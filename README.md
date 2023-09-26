@@ -1,7 +1,7 @@
 # heuristicount
 Supply some known barcodes (sgRNAs), and discover the rest using `heuristicount.py`. Heuristicount.py is unique that it uses pattern matching to discover new barcodes in your data, while also retaining strict rules to prevent overcounting.
 
-```vim
+```Volt
 ❯ python heuristicount.py design_key.fasta ABA1-10_S149_L004_R1_001.fastq.gz ABA1-10_S149_L004_R2_001.fastq.gz > barcode_results.tsv
 [09:44:44] Initializing heuristic barcode counting                                                                                                                                                                                                          heuristicount.py:179
            Reading barcodes...                                                                                                                                                                                                                              heuristicount.py:184
@@ -61,7 +61,7 @@ Supply some known barcodes (sgRNAs), and discover the rest using `heuristicount.
 
 # targets
 Find genomic targets for your barcodes using `targets.py`. Targets.py circularizes genomes and quickly finds all valid targets using Bowtie, providing a report to help design or interpret experiments. 
-```vim
+```Volt
 ❯ python targets.py heuristic_key.fasta GCF_009759685.1.gb 1 > heuristic_targets.tsv
 [09:46:35] Initializing barcode target seeker                                                                                                                                                                                                                     targets.py:298
            Circularizing genome...                                                                                                                                                                                                                                targets.py:317
