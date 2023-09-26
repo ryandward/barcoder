@@ -1,45 +1,101 @@
 # heuristicount
 Supply some known barcodes (sgRNAs), and discover the rest using `heuristicount.py`. Heuristicount.py is unique that it uses pattern matching to discover new barcodes in your data, while also retaining strict rules to prevent overcounting.
 
-```
+```vim
 ❯ python heuristicount.py design_key.fasta ABA1-10_S149_L004_R1_001.fastq.gz ABA1-10_S149_L004_R2_001.fastq.gz > barcode_results.tsv
-```
-![image](https://github.com/ryandward/barcoder/assets/6970996/b7be2c0f-8154-41bd-9c5a-b1a8cc4b383a)
-```
-❯ head barcode_results.tsv | tabulate   
---------------------  ----
-ATTGCGTTACCAGCATAGAT  4010
-AAAGTGTGATTCAATAAACA  5280
-ATTTACGTGGATCTACGCCT  5871
-AGCGGTTGCATTTTAATATC  6780
-CGCGCATCTTTGTTAATGTG  3734
-TTAACGGCATCTACACTATC  3333
-GGCATCCAGAAAGAAGCTTC  3625
-AAGTGCTAGAGGACCTAGTA  3073
-ATGTTATGTCATCTTGAAGG  2832
-CTTTAATGCGATCGTAGGGC  1886
---------------------  ----
+[09:44:44] Initializing heuristic barcode counting                                                                                                                                                                                                          heuristicount.py:179
+           Reading barcodes...                                                                                                                                                                                                                              heuristicount.py:184
+           Reading results from FASTQ...                                                                                                                                                                                                                    heuristicount.py:191
+[09:45:18] Finding orientation of paired-end reads...                                                                                                                                                                                                       heuristicount.py:200
+           Finding forward coordinates...                                                                                                                                                                                                                   heuristicount.py:223
+           Finding reverse coordinates                                                                                                                                                                                                                      heuristicount.py:231
+[09:45:19] Finding forward junctions...                                                                                                                                                                                                                     heuristicount.py:242
+           Finding reverse junctions...                                                                                                                                                                                                                     heuristicount.py:249
+           Mapping junctions to barcodes...                                                                                                                                                                                                                 heuristicount.py:256
+           Counting barcodes at junctions...                                                                                                                                                                                                                heuristicount.py:264
+[09:45:41] Preparing results...                                                                                                                                                                                                                             heuristicount.py:269
+           Heuristic filtering and identifying new barcodes...                                                                                                                                                                                              heuristicount.py:277
+                                                                                                                                                                                                                                                            heuristicount.py:384
+                           heuristicount.py                             Summary                                                                                                                                                                                                 
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                                                                                                                                                                                
+                             Input & Config                                                                                                                                                                                                                                     
+                                   Barcodes                    design_key.fasta                                                                                                                                                                                                 
+                              Forward Reads   ABA1-10_S149_L004_R2_001.fastq.gz                                                                                                                                                                                                 
+                              Reverse Reads   ABA1-10_S149_L004_R1_001.fastq.gz                                                                                                                                                                                                 
+                                    Threads                                  12                                                                                                                                                                                                 
+                           Operating System                               Linux                                                                                                                                                                                                 
+                                                                                                                                                                                                                                                                                
+                                 Heuristics                                                                                                                                                                                                                                     
+                             Barcode Length                                  20                                                                                                                                                                                                 
+                             Forward Offset                                 100                                                                                                                                                                                                 
+                             Reverse Offset                                  82                                                                                                                                                                                                 
+                           Forward Junction                         TAGT...GTTT                                                                                                                                                                                                 
+                           Reverse Junction                         AAAC...ACTA                                                                                                                                                                                                 
+                                                                                                                                                                                                                                                                                
+                    Barcode Alignment Stats                                                                                                                                                                                                                                     
+                          Barcodes Declared                                6680                                                                                                                                                                                                 
+                  Documented Barcodes Found                                6666                                                                                                                                                                                                 
+                Undocumented Barcodes Found                               32696                                                                                                                                                                                                 
+                                Total Reads                            19275050                                                                                                                                                                                                 
+                   Documented Barcode Reads                            17267584                                                                                                                                                                                                 
+                 Undocumented Barcode Reads                              109911                                                                                                                                                                                                 
+                        Documented Fraction                              0.8959                                                                                                                                                                                                 
+                      Undocumented Fraction                              0.0057                                                                                                                                                                                                 
+                                                                                                                                                                                                                                                                                
+                  Top 5 Documented Barcodes                                                                                                                                                                                                                                     
+                       AGGCGACTCCACAATCACTG                               18003                                                                                                                                                                                                 
+                       AATTGATCAATCAGATTGGT                               17574                                                                                                                                                                                                 
+                       AGCAGATCGACTTCATATTT                               17465                                                                                                                                                                                                 
+                       CCATCACTACCATCCATAAT                               14902                                                                                                                                                                                                 
+                       CAGCTCGGCTCAAATCATTC                               13845                                                                                                                                                                                                 
+                                                                                                                                                                                                                                                                                
+                Top 5 Undocumented Barcodes                                                                                                                                                                                                                                     
+                      ACTCCACAAACTGAAAGATA*                                1535                                                                                                                                                                                                 
+                      ATCCTCATTGGTCGAAGTTT*                                 709                                                                                                                                                                                                 
+                      AGGCGACTCAACAATCACTG*                                 642                                                                                                                                                                                                 
+                      AGCTTTAATTTAATCACCAC*                                 606                                                                                                                                                                                                 
+                      AGGCGGCTCCACAATCACTG*                                 602                                                                                                                                                                                                 
+                                                                                                                                                                                                                                                                                
+                           Finished at 2023-09-26 09:45:41.374100
 ```
 
 # targets
 Find genomic targets for your barcodes using `targets.py`. Targets.py circularizes genomes and quickly finds all valid targets using Bowtie, providing a report to help design or interpret experiments. 
-```
-❯ awk '{print ">" $1; gsub(/\*$/, "", $1); print $1}' barcode_results.tsv > heuristic_key.fasta
+```vim
 ❯ python targets.py heuristic_key.fasta GCF_009759685.1.gb 1 > heuristic_targets.tsv
-```
-![image](https://github.com/ryandward/barcoder/assets/6970996/be39e064-cc05-43a7-aded-ef2210ce6232)
-```
-❯ head heuristic_targets.tsv | tabulate -1                   
-name                  spacer                pam      len  locus_tag    chr         target                  mismatches  diff    coords              offset  sp_dir    tar_dir
---------------------  --------------------  -----  -----  -----------  ----------  --------------------  ------------  ------  ----------------  --------  --------  ---------
-ATTGCGTTACCAGCATAGAT  ATTGCGTTACCAGCATAGAT  TGG       20  GO593_02110  CP046654.1  ATTGCGTTACCAGCATAGAT             0  -       431230..431250         378  F         R
-AAAGTGTGATTCAATAAACA  AAAGTGTGATTCAATAAACA  AGG       20  GO593_09085  CP046654.1  AAAGTGTGATTCAATAAAtA             1  a2G     1914661..1914681       201  R         F
-ATTTACGTGGATCTACGCCT  ATTTACGTGGATCTACGCCT  AGG       20  GO593_07940  CP046654.1  ATTTACGTGGATCTACGCCa             1  t1A     1661276..1661296       143  R         F
-AGCGGTTGCATTTTAATATC  AGCGGTTGCATTTTAATATC  AGG       20  GO593_01430  CP046654.1  AGCGGTTGCATTTTAATgTC             1  g18A    284082..284102         170  F         R
-CGCGCATCTTTGTTAATGTG  CGCGCATCTTTGTTAATGTG  CGG       20  GO593_04205  CP046654.1  CGCGCATCTTTGTTAAcGTG             1  c17T    883479..883499         165  F         R
-TTAACGGCATCTACACTATC  TTAACGGCATCTACACTATC  TGG       20  GO593_11615  CP046654.1  TTAACGGCATCTtCACTATC             1  t13A    2446470..2446490       279  F         R
-GGCATCCAGAAAGAAGCTTC  GGCATCCAGAAAGAAGCTTC  TGG       20  GO593_13095  CP046654.1  GGCATCCAGAAAGAAGCTTC             0  -       2736511..2736531       111  F         R
-AAGTGCTAGAGGACCTAGTA  AAGTGCTAGAGGACCTAGTA  AGG       20  GO593_17785  CP046654.1  AAGTGCTAGAGcACCTAGTA             1  c12G    3724024..3724044       154  F         R
-AAAGTGTGATTCAATAAATA  AAAGTGTGATTCAATAAATA  AGG       20  GO593_09085  CP046654.1  AAAGTGTGATTCAATAAATA             0  -       1914661..1914681       201  R         F
+[09:46:35] Initializing barcode target seeker                                                                                                                                                                                                                     targets.py:298
+           Circularizing genome...                                                                                                                                                                                                                                targets.py:317
+           Annotating regions to identify...                                                                                                                                                                                                                      targets.py:328
+           Aligning annotations to genome...                                                                                                                                                                                                                      targets.py:334
+[09:46:38] Generating genome maps...                                                                                                                                                                                                                              targets.py:337
+[09:46:43] Finding matches...                                                                                                                                                                                                                                     targets.py:341
+[09:46:44] Cleaning up...                                                                                                                                                                                                                                         targets.py:353
+                                                                                                                                                                                                                                                                  targets.py:460
+                                 targets.py                   Summary                                                                                                                                                                                                           
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                                                                                                                                                                                          
+                             Input & Config                                                                                                                                                                                                                                     
+                                   Barcodes       heuristic_key.fasta                                                                                                                                                                                                           
+                        Genbank Genome File        GCF_009759685.1.gb                                                                                                                                                                                                           
+                       Number of Mismatches                         1                                                                                                                                                                                                           
+                                    Threads                        12                                                                                                                                                                                                           
+                           Operating System                     Linux                                                                                                                                                                                                           
+                                                                                                                                                                                                                                                                                
+                                 Heuristics                                                                                                                                                                                                                                     
+                                   Organism   Acinetobacter baumannii                                                                                                                                                                                                           
+                                Chromosomes                         2                                                                                                                                                                                                           
+                                Total Genes                      3805                                                                                                                                                                                                           
+                          Overlapping Genes                       724                                                                                                                                                                                                           
+                      Ambiguous Coordinates                      6511                                                                                                                                                                                                           
+                                                                                                                                                                                                                                                                                
+                      Barcode Mapping Stats                                                                                                                                                                                                                                     
+                             Genes Targeted                       408                                                                                                                                                                                                           
+                         Targeting Barcodes                     12468                                                                                                                                                                                                           
+                         0 Mismatch Spacers                      1615                                                                                                                                                                                                           
+                         1 Mismatch Spacers                     10846                                                                                                                                                                                                           
+                     Non-targeting Barcodes                     26921                                                                                                                                                                                                           
+                        Intergenic Barcodes                         0                                                                                                                                                                                                           
+                         Ambiguous Barcodes                         7                                                                                                                                                                                                           
+                                                                                                                                                                                                                                                                                
+                      Finished at 2023-09-26 09:46:44.121173   
 
 ```
