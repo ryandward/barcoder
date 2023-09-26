@@ -386,7 +386,9 @@ def main(args):
     combined_table.add_row("Barcodes", f"[bold]{os.path.basename(args.sgrna_file)}[/bold]")
     combined_table.add_row("Genbank Genome File", f"[bold]{os.path.basename(args.genome_file)}[/bold]")
     combined_table.add_row("Number of Mismatches", f"[bold]{args.mismatches}[/bold]")
-    
+    combined_table.add_row("Threads", f"[bold]{num_threads}[/bold]")
+    combined_table.add_row("Operating System", f"[bold]{platform.system()}[/bold]")
+
     # Heuristic Statistics Sub-heading
     combined_table.add_section()
     combined_table.add_row("[bold bright_blue]Heuristics[/bold bright_blue]", "")
