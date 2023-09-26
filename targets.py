@@ -3,6 +3,7 @@ import copy
 import gzip
 import hashlib
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -346,7 +347,7 @@ def main(args):
         results[integer_cols] = results[integer_cols].astype('Int64')
     
     except FileNotFoundError:
-        console.log(f"[bold red]Could not open the SAM file '{sam_file}'. Please try using a lower number of mismatches.[/bold red]")
+        console.log(f"[bold red]Could map barcodes. Please try using a lower number of mismatches.[/bold red]")
         sys.exit(1)
 
     console.log(f"Cleaning up...")
@@ -407,43 +408,53 @@ def main(args):
     ambiguous_coordinates = {pos for pos, count in Counter(key[1] for key in locus_map.keys()).items() if count > 1}
     overlapping_genes = {tag for _, values in locus_map.items() if len(values) > 1 for value in values for tag in [value[0]]}
     combined_table.add_row("Chromosomes", f"[bold]{len(set(key[0] for key in locus_map.keys()))}[/bold]")
-    combined_table.add_row("Genes", f"[bold]{len(set(value[0][0] for value in locus_map.values()))}[/bold]")
+    combined_table.add_row("Total Genes", f"[bold]{len(set(value[0][0] for value in locus_map.values()))}[/bold]")
     
  
-
+    combined_table.add_row("Overlapping Genes", f"[bold]{len(overlapping_genes)}[/bold]")
     combined_table.add_row("Ambiguous Coordinates", f"[bold]{len(ambiguous_coordinates)}[/bold]")
-    combined_table.add_row("Genes with Overlap", f"[bold]{len(overlapping_genes)}[/bold]")
 
     spanning_genes = {}
 
-    for (chromosome, position), values in locus_map.items():
-        if position % seq_lens[chromosome] == 0:
-            for value in values:
-                tag, _, _, _ = value
-                if chromosome not in spanning_genes:
-                    spanning_genes[chromosome] = []
-                spanning_genes[chromosome].append(tag)
+    # for (chromosome, position), values in locus_map.items():
+    #     if position % seq_lens[chromosome] == 0:
+    #         for value in values:
+    #             tag, _, _, _ = value
+    #             if chromosome not in spanning_genes:
+    #                 spanning_genes[chromosome] = []
+    #             spanning_genes[chromosome].append(tag)
 
-    for chromosome, genes in spanning_genes.items():
-        gene_list = ", ".join(genes)
-        combined_table.add_row(f"Origin-Spanning: {chromosome}", f"[bold]{gene_list}[/bold]")
+    # for chromosome, genes in spanning_genes.items():
+    #     gene_list = ", ".join(genes)
+    #     combined_table.add_row(f"Origin-Spanning: {chromosome}", f"[bold]{gene_list}[/bold]")
 
     # Barcode Mapping Stats Sub-heading
     combined_table.add_section()
     combined_table.add_row("[bold bright_green]Barcode Mapping Stats[/bold bright_green]", "")
-    combined_table.add_row("Targeting Barcodes", f"[bold]{len(results)}[/bold]")
-    mismatch_counts = results['mismatches'].value_counts().sort_index()
 
-    for mismatch, count in mismatch_counts.items():
-        combined_table.add_row(f"{mismatch} Mismatch Barcodes", f"[bold]{count}[/bold]")
+    unique_tags = len(set(x for x in results['locus_tag'] if x is not None))
+    combined_table.add_row("Genes Targeted", f"[bold]{unique_tags}[/bold]")
+
+    combined_table.add_row("Targeting Barcodes", f"[bold]{len(results)}[/bold]")
+
+    unique_spacers_per_mismatch = results.groupby('mismatches')['spacer'].apply(set)
+
+    for mismatch, unique_spacers in unique_spacers_per_mismatch.items():
+        count = len(unique_spacers)
+        combined_table.add_row(f"{mismatch} Mismatch Spacers", f"[bold]{count}[/bold]")
 
     combined_table.add_row("Non-targeting Barcodes", f"[bold]{unmapped}[/bold]")
+
+    none_targeting_unique_spacers = len(set(spacer for spacer, tag in zip(results['spacer'], results['locus_tag']) if tag is None))
+    combined_table.add_row("Intergenic Barcodes", f"[bold]{none_targeting_unique_spacers}[/bold]")
 
     spacer_counts = Counter(results['spacer'])
     duplicates = {spacer: count for spacer, count in spacer_counts.items() if count > 1}
     num_duplicates = len(duplicates)
-
     combined_table.add_row("Ambiguous Barcodes", f"[bold]{num_duplicates}[/bold]")
+
+
+
     
     # Print the combined table
     console.log(combined_table)
