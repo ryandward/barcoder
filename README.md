@@ -22,7 +22,7 @@ CTTTAATGCGATCGTAGGGC  1886
 ```
 
 # targets
-Find genomic targets for your barcodes using `targets.py`. Targets.py circularizes genomes and quickly finds all targets in a genome using Bowtie, providing a report to help design or interpret experiments. 
+Find genomic targets for your barcodes using `targets.py`. Targets.py circularizes genomes and quickly finds all valid targets using Bowtie, providing a report to help design or interpret experiments. 
 ```
 ❯ awk '{print ">" $1; gsub(/\*$/, "", $1); print $1}' barcode_results.tsv > heuristic_key.fasta
 ❯ python targets.py heuristic_key.fasta GCF_009759685.1.gb 1 > heuristic_targets.tsv
