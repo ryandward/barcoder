@@ -32,16 +32,18 @@ def create_working_directory(dir_name="working_directory"):
     os.makedirs(dir_name, exist_ok=True)
     return dir_name
 
-def convert_genbank_to_fasta(genbank_file, fasta_file, overhang_length=1000):
+def convert_genbank_to_fasta(genbank_file, fasta_file, overhang_length=0):
     modified_records = []
     open_func = gzip.open if genbank_file.endswith(".gz") else open
 
     with open_func(genbank_file, "rt") as input_handle:
         for record in SeqIO.parse(input_handle, "genbank"):
-            # Create new sequence with overhang
-            new_seq = record.seq + record.seq[:overhang_length]
-            modified_record = SeqRecord(Seq(str(new_seq)), id=record.id, description=record.description)
-            modified_records.append(modified_record)
+            if record.annotations.get('topology', None) == 'circular':
+                # Create new sequence with overhang
+                overhang_length = 10000
+                new_seq = record.seq + record.seq[:overhang_length]
+                modified_record = SeqRecord(Seq(str(new_seq)), id=record.id, description=record.description)
+                modified_records.append(modified_record)
 
     # Write the modified records to a new FASTA file
     with open(fasta_file, "w") as output_handle:
@@ -73,7 +75,7 @@ def run_bowtie(sgrna_fastq_file, fasta_file, sam_file, num_mismatches, num_threa
             stderr=devnull,
         )
         subprocess.run(
-            ["bowtie", "-a", "-p", str(num_threads), "--tryhard", "--best", "-v", str(num_mismatches), "-S", index_prefix, sgrna_fastq_file, sam_file],
+            ["bowtie", "--all", "--nomaqround", "-p", str(num_threads), "--tryhard", "-v", str(num_mismatches), "-S", index_prefix, sgrna_fastq_file, sam_file],
             stdout=devnull,
             stderr=devnull,
         )
@@ -83,15 +85,17 @@ def run_bowtie(sgrna_fastq_file, fasta_file, sam_file, num_mismatches, num_threa
             if file.startswith(index_prefix) and file.endswith(".ebwt"):
                 os.remove(file)
 
-def create_locus_map(genbank_file, overhang_length=1000):
-    locus_map, overhangs, organisms, seq_lens = {}, {}, {}, {}
+def create_locus_map(genbank_file):
+    locus_map, overhangs, organisms, seq_lens, topologies = {}, {}, {}, {}, {}
 
     with open(genbank_file, "rt") as input_handle:
         for record in SeqIO.parse(input_handle, "genbank"):
-            organisms[record.id] = record.annotations.get('organism', None)
-
             overhangs[record.id] = 0
+            organisms[record.id] = record.annotations.get('organism', None)
             seq_lens[record.id] = len(record.seq)
+            topologies[record.id] = record.annotations.get('topology', None)
+
+            overhang_length = 10000 if topologies[record.id] == 'circular' else 0
 
             for feature in record.features:
                 if feature.type == "gene":
@@ -140,7 +144,7 @@ def create_locus_map(genbank_file, overhang_length=1000):
                                     feature.strand)
                                 )
 
-    return locus_map, organisms, seq_lens
+    return locus_map, organisms, seq_lens, topologies
 
 # Reconstruct the target sequence using the cigar string
 def reconstruct_target(read):
@@ -267,9 +271,9 @@ def parse_sam_output(sam_file_path, gene_locus_map, reference_fasta_path, refere
         aligned_genes = {gene_info for pos in range(row_data['tar_start'], row_data['tar_end'])
                         for gene_info in gene_locus_map.get((row_data['chr'], pos), [])}
 
-        if not re.match('.GG$', row_data['pam']): #NGG pam
-            unmapped+=1
-            continue
+        # if not re.match('.GG$', row_data['pam']): #NGG pam
+        #     unmapped+=1
+        #     continue
 
         if not aligned_genes:
             row_data_copy = copy.deepcopy(row_data)
@@ -314,16 +318,15 @@ def main(args):
 
     os.makedirs(output_folder, exist_ok=True)
 
-    console.log("Circularizing genome...")
-    convert_genbank_to_fasta(args.genome_file, fasta_file)
+    console.log("Generating topological coordinate maps...")
+    locus_map, organisms, seq_lens, topologies = create_locus_map(args.genome_file)
 
+    console.log("Generating topological gene maps...")
+    convert_genbank_to_fasta(args.genome_file, fasta_file)
     # Delete existing .fai file if it exists
     fai_file = fasta_file + ".fai"
     if os.path.exists(fai_file):
         os.remove(fai_file)
-
-    with pysam.FastaFile(fasta_file) as _:
-        pass
 
     console.log("Annotating regions to identify...")
     convert_fasta_to_fake_fastq(args.sgrna_file, sgrna_fastq_file)
@@ -333,9 +336,9 @@ def main(args):
 
     console.log("Aligning annotations to genome...")
     run_bowtie(sgrna_fastq_file, fasta_file, sam_file, args.mismatches, num_threads)
-    
-    console.log("Generating genome maps...")
-    locus_map, organisms, seq_lens = create_locus_map(args.genome_file)
+
+    with pysam.FastaFile(fasta_file) as _:
+        pass
 
     try:
         console.log("Finding matches...")    
@@ -345,10 +348,18 @@ def main(args):
         results = results[column_order]
         integer_cols = ['len', 'mismatches', 'offset']
         results[integer_cols] = results[integer_cols].astype('Int64')
-    
+
     except FileNotFoundError:
-        console.log(f"[bold red]Could map barcodes. Please try using a lower number of mismatches.[/bold red]")
+        console.log(f"[bold red]Trouble with Bowtie aligner. User a lower number of mismatches.[/bold red]")
         sys.exit(1)
+
+    except KeyError:
+        console.log(f"[bold red]None of the proposed barcodes map to the genomes.[/bold red]")
+        sys.exit(1)
+
+
+
+    
 
     console.log(f"Cleaning up...")
 
@@ -441,9 +452,7 @@ def main(args):
 
     for mismatch, unique_spacers in unique_spacers_per_mismatch.items():
         count = len(unique_spacers)
-        combined_table.add_row(f"{mismatch} Mismatch Spacers", f"[bold]{count}[/bold]")
-
-    combined_table.add_row("Non-targeting Barcodes", f"[bold]{unmapped}[/bold]")
+        combined_table.add_row(f"{mismatch} Mismatch Barcodes", f"[bold]{count}[/bold]")
 
     none_targeting_unique_spacers = len(set(spacer for spacer, tag in zip(results['spacer'], results['locus_tag']) if tag is None))
     combined_table.add_row("Intergenic Barcodes", f"[bold]{none_targeting_unique_spacers}[/bold]")
@@ -452,6 +461,8 @@ def main(args):
     duplicates = {spacer: count for spacer, count in spacer_counts.items() if count > 1}
     num_duplicates = len(duplicates)
     combined_table.add_row("Ambiguous Barcodes", f"[bold]{num_duplicates}[/bold]")
+
+    combined_table.add_row("Non-targeting Barcodes", f"[bold]{unmapped}[/bold]")
 
 
 
