@@ -2,14 +2,14 @@ import argparse
 import gzip
 import os
 import platform
-import subprocess
 import sys
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from datetime import datetime
-from itertools import chain
 from multiprocessing import Pool, cpu_count
 
 import rich
+import zstandard as zstd
 from Bio.Seq import Seq
 from rich.console import Console
 from rich.table import Table
@@ -24,110 +24,117 @@ def read_fasta(fasta_file):
                 barcodes.add(line.strip())
     return barcodes
 
-def fastq_reader(proc_stdout, should_decode):
-    while True:
-        next(proc_stdout, None)
-        seq_line = next(proc_stdout, None)
-        next(proc_stdout, None)
-        next(proc_stdout, None)
-        if seq_line is None:
-            break
-        yield seq_line.decode().strip() if should_decode else seq_line.strip()
-
-def read_fastq(fastq1_file, fastq2_file, num_threads):
-    if fastq2_file:
-
-        paired_reads1, paired_reads2 = [], []
-        proc1 = proc2 = None
-
-        if fastq1_file.endswith('.gz'):
-            try:
-                proc1 = subprocess.Popen(["pigz", "-dc", fastq1_file], stdout=subprocess.PIPE)
-                proc2 = subprocess.Popen(["pigz", "-dc", fastq2_file], stdout=subprocess.PIPE)
-                f1, f2 = proc1.stdout, proc2.stdout
-            except FileNotFoundError:
-                f1 = gzip.open(fastq1_file, 'rt')
-                f2 = gzip.open(fastq2_file, 'rt')
-        else:
-            f1 = open(fastq1_file, 'rt')
-            f2 = open(fastq2_file, 'rt')
-
-        should_decode = bool(proc1 and proc2)
-
-        for seq1, seq2 in zip(fastq_reader(f1, should_decode), fastq_reader(f2, should_decode)):
-            paired_reads1.append(seq1)
-            paired_reads2.append(seq2)
-
-        if proc1 and proc2:
-            proc1.wait()
-            proc2.wait()
-
-        chunk_size = len(paired_reads1) // num_threads
-        return [(paired_reads1[i:i+chunk_size], paired_reads2[i:i+chunk_size]) for i in range(0, len(paired_reads1), chunk_size)]
-    
+def open_file(file_path, mode):
+    if file_path.endswith('.gz'):
+        return gzip.open(file_path, mode)
+    elif file_path.endswith('.zst'):
+        return zstd.open(file_path, mode)
+    elif file_path.endswith('.fastq'):
+        return open(file_path, mode)
+    elif file_path.endswith('.reads'):
+        return open(file_path, mode)
     else:
-        reads1 = []
-        if fastq1_file.endswith('.gz'):
-            f1 = gzip.open(fastq1_file, 'rt')
-        else:
-            f1 = open(fastq1_file, 'rt')
-        for seq1 in fastq_reader(f1, False):
-            reads1.append(seq1)
-        chunk_size = len(reads1) // num_threads
-        return [(reads1[i:i+chunk_size], None) for i in range(0, len(reads1), chunk_size)]
+        raise ValueError("Unsupported file type.")
 
-from contextlib import nullcontext
+def read_in_chunks(file1, file2=None, chunk_size=256, yield_first=False):
+    """
+    Generator function to read DNA sequences from one or two FASTQ or '.reads' files in chunks.
 
+    Parameters:
+    - file1: Path to the first file (required)
+    - file2: Path to the second file (optional)
+    - chunk_size: Number of sequences to read in each chunk (default is 256)
+    - yield_first: If True, yields the first chunk as soon as it fills (default is False)
 
-def read_fastq_in_chunks(file1, file2=None, chunk_size=256, yield_first=False):
+    Yields:
+    - Tuple of lists containing DNA sequences from file1 and file2, respectively. 
+    Second element is None if file2 is not provided.
+
+    Raises:
+    - ValueError if an unsupported file type is encountered.
+
+    Note:
+    - This function supports both compressed (.gz, .zst) and uncompressed files.
+    - Skips FASTQ metadata and quality scores, returns only DNA sequences.
+    """
     reads1, reads2 = [], []
     
-    open_fn = gzip.open if file1.endswith('.gz') else open
-    open_fn2 = gzip.open if file2 and file2.endswith('.gz') else open
+    # Remove compression extension if present
+    stripped_file1 = file1
+    if file1.endswith('.gz') or file1.endswith('.zst'):
+        stripped_file1 = os.path.splitext(file1)[0]
+        
+    # Determine the file type based on the stripped extension
+    if stripped_file1.endswith('.fastq'):
+        file_type = 'fastq'
+    elif stripped_file1.endswith('.reads'):
+        file_type = 'reads'
+    else:
+        raise ValueError("Unsupported file type. Must be '.fastq' or '.reads'.")
     
-    with open_fn(file1, 'rt') as f1, (open_fn2(file2, 'rt') if file2 else nullcontext()) as f2:
+    with open_file(file1, 'rt') as f1, (open_file(file2, 'rt') if file2 else nullcontext()) as f2:
         iters = [iter(f1), iter(f2) if f2 else iter([])]
         
         while True:
             try:
-                next(iters[0])  # Skip @SEQUENCE_ID
-                reads1.append(next(iters[0]).strip())  # Capture SEQUENCE
-                next(iters[0])  # Skip +
-                next(iters[0])  # Skip QUALITY
-                        
-                if file2:
-                    next(iters[1])  # Skip @SEQUENCE_ID
-                    reads2.append(next(iters[1]).strip())  # Capture SEQUENCE
-                    next(iters[1])  # Skip +
-                    next(iters[1])  # Skip QUALITY
-                    
+                if file_type == 'fastq':
+                    next(iters[0])  # Skip @SEQUENCE_ID
+                    reads1.append(next(iters[0]).strip())  # Capture SEQUENCE
+                    next(iters[0])  # Skip +
+                    next(iters[0])  # Skip QUALITY
+
+                    if file2:
+                        next(iters[1])  # Skip @SEQUENCE_ID
+                        reads2.append(next(iters[1]).strip())  # Capture SEQUENCE
+                        next(iters[1])  # Skip +
+                        next(iters[1])  # Skip QUALITY
+
+                elif file_type == 'reads':
+                    reads1.append(next(iters[0]).strip())  # Capture SEQUENCE
+
+                    if file2:
+                        reads2.append(next(iters[1]).strip())  # Capture SEQUENCE
+                
                 if yield_first and len(reads1) >= chunk_size:
                     yield (reads1[:chunk_size], reads2[:chunk_size] if reads2 else None)
                     reads1, reads2 = reads1[chunk_size:], reads2[chunk_size:] if reads2 else []
-                    yield_first = False  # So it doesn't yield_first again
-                    
+                    yield_first = False
+                
                 elif len(reads1) >= chunk_size:
                     yield (reads1[:chunk_size], reads2[:chunk_size] if reads2 else None)
                     reads1, reads2 = reads1[chunk_size:], reads2[chunk_size:] if reads2 else []
-
                     
             except StopIteration:
                 break
                 
-    if reads1:
-        yield (reads1, reads2 if reads2 else None)
-
+        if reads1:
+            yield (reads1, reads2 if reads2 else None)
 
 def count_barcodes(seq, barcode_length, barcodes):
     # Generate k-mers and count matches with barcodes
     kmers = {seq[i:i + barcode_length] for i in range(len(seq) - barcode_length + 1)}
     return len(barcodes & kmers)
 
-def determine_forward_read(sample1, sample2, barcodes):
+def determine_forward_read(sample1, sample2, barcodes, chunk_size=256):
+    """
+    Determines which of the two samples, sample1 or sample2, is more likely the forward read based on barcode counts.
+
+    Parameters:
+    - sample1: List of DNA sequences (read 1)
+    - sample2: List of DNA sequences (read 2); None for single-end
+    - barcodes: Set of known barcodes to look for in the samples
+    - chunk_size: Number of sequences to examine (default is 256)
+
+    Returns:
+    - Boolean: True if sample2 or reverse complement of sample1 has more barcode matches, False otherwise.
+
+    Note:
+    - Utilizes early exit strategy if a clear winner is found before examining all sequences.
+    """
     barcode_length = len(next(iter(barcodes)))
     count1, count2 = 0, 0
 
-    for i in range(min(256, len(sample1))):
+    for i in range(min(chunk_size, len(sample1))):
         seq1 = sample1[i]
         seq2 = sample2[i] if sample2 else None  # seq2 is None for single-end
 
@@ -135,7 +142,7 @@ def determine_forward_read(sample1, sample2, barcodes):
         count1 += count_barcodes(seq1, barcode_length, barcodes)
         
         # Early exit if count1 is overwhelmingly large
-        if count1 > 128:
+        if count1 > chunk_size/2:
             return False
         
         # For paired-end or reverse complement of single-end
@@ -144,7 +151,7 @@ def determine_forward_read(sample1, sample2, barcodes):
             count2 += count_barcodes(seq2, barcode_length, barcodes)
             
             # Early exit if count2 is overwhelmingly large
-            if count2 > 128:
+            if count2 > chunk_size/2:
                 return True
         else:
             # Count barcode matches in reverse complement of seq1
@@ -152,7 +159,7 @@ def determine_forward_read(sample1, sample2, barcodes):
             count2 += count_barcodes(seq1_rc, barcode_length, barcodes)
             
             # Early exit if count2 is overwhelmingly large
-            if count2 > 128:
+            if count2 > chunk_size/2:
                 return True
 
     # True if more barcodes found in seq2 or reverse complement of seq1
@@ -160,6 +167,19 @@ def determine_forward_read(sample1, sample2, barcodes):
 
 
 def find_ends(reads, start, length, reverse_strand=False):
+    """
+    Finds the most common flanking sequences on both sides of a specified region in a list of DNA reads.
+
+    Parameters:
+    - reads: List of DNA reads
+    - start: Starting index of the region in each read
+    - length: Length of the region
+    - reverse_strand: If True, considers the reverse strand; affects initial max_left and max_right values
+
+    Returns:
+    - left_most_common: Most common sequence to the left of the specified region
+    - right_most_common: Most common sequence to the right of the specified region
+    """
     # Initialize max values; reverse if needed
     max_left, max_right = (4, 4) if not reverse_strand else (4, 4)[::-1]
 
@@ -187,6 +207,29 @@ def find_ends(reads, start, length, reverse_strand=False):
     return left_most_common, right_most_common
 
 def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_length, left1, right1, left2, right2, need_swap):
+    """
+    Process a chunk of DNA sequences to count barcode occurrences.
+
+    Parameters:
+    - chunk: Tuple of lists containing DNA sequences from file1 and file2, respectively.
+    - barcodes: Set of valid barcode sequences.
+    - barcode_start1: Start position for barcode in reads from file1.
+    - barcode_start2: Start position for barcode in reads from file2 (or None for single-end).
+    - barcode_length: Length of barcode sequences.
+    - left1: Left flanking sequence for barcode in reads from file1 (or None for none).
+    - right1: Right flanking sequence for barcode in reads from file1 (or None for none).
+    - left2: Left flanking sequence for barcode in reads from file2 (or None for single-end).
+    - right2: Right flanking sequence for barcode in reads from file2 (or None for single-end).
+    - need_swap: Boolean indicating whether reads1 and reads2 should be swapped (for reverse complement processing).
+
+    Returns:
+    - Tuple containing a dictionary of barcode counts and the total number of reads processed.
+
+    Note:
+    - This function handles both paired-end and single-end data.
+    - Barcodes are counted based on their position and flanking sequences.
+    - If paired-end data is provided, both reads must have the same length.
+    """
     reads1, reads2 = chunk
 
     if need_swap:
@@ -235,6 +278,24 @@ def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_lengt
     return (counts, len(reads1) if reads1 else len(reads2))
 
 def find_start_positions(reads, barcodes, barcode_length, is_read2=False):
+    """
+    Find the start positions of barcodes in a chunk of DNA sequences.
+
+    Parameters:
+    - reads: List of DNA sequences.
+    - barcodes: Set of valid barcode sequences.
+    - barcode_length: Length of barcode sequences.
+    - is_read2: Boolean indicating whether the reads belong to file2 (for reverse complement processing).
+
+    Returns:
+    - The most common start position of barcodes in the provided reads.
+
+    Note:
+    - This function handles both file1 and file2 reads.
+    - It counts barcode occurrences at different start positions.
+    - Returns the most common start position of barcodes.
+    - If `is_read2` is True, it performs reverse complement processing.
+    """
     if reads is None:
         return None
     
@@ -266,7 +327,7 @@ def main(args):
     console.log("Sampling initial reads for orientation...")
     # chunks = read_fastq(args.fastq1, args.fastq2 if is_paired_end else None, num_threads)
     # sample1, sample2 = chunks[0]
-    chunk_generator = read_fastq_in_chunks(args.fastq1, args.fastq2 if is_paired_end else None, yield_first=True)
+    chunk_generator = read_in_chunks(args.fastq1, args.fastq2 if is_paired_end else None, yield_first=True)
     first_chunk = next(chunk_generator)
     sample1, sample2 = first_chunk
 
@@ -284,7 +345,6 @@ def main(args):
     # Apply the swap logic
     if need_swap:
         sample1, sample2 = sample2, sample1
-
 
     # Initialize to None
     barcode_start1 = None
@@ -310,7 +370,6 @@ def main(args):
 
     # console.log(f"Forward barcode start: {barcode_start1}", f"Reverse barcode start: {barcode_start2}", sep='\n')
 
-    
     # Find flanking sequences
     if sample1 is not None:
         console.log("Identifying forward read junctions...")
@@ -326,12 +385,9 @@ def main(args):
     else:
         left2, right2 = None, None
 
-    # console.log(f"Barcode length = {barcode_length}, Forward junction: {left1}...{right1}", f"Reverse junction: {left2}...{right2}", sep='\n')
-
    # Calculate reverse complements
     left2_rc = left2[::-1].translate(str.maketrans("ATCGN", "TAGCN")) if left2 else None
     right2_rc = right2[::-1].translate(str.maketrans("ATCGN", "TAGCN")) if right2 else None
-
 
     # Check if the forward and reverse flanking sequences are reverse complements
     min_len_left = min_len_right = 0
@@ -340,22 +396,15 @@ def main(args):
         min_len_left = min(len(left1), len(right2_rc))
         # console.log(f"Comparing {left1[-min_len_left:]} and {right2_rc[:min_len_left]}")
         if left1[-min_len_left:] != right2_rc[:min_len_left]:
-
             console.log("[bold red]Error: Forward and reverse left flanking sequences are not reverse complements.[/bold red]")
             sys.exit(1)
         
-
     if right1 and left2_rc:
         min_len_right = min(len(right1), len(left2_rc))
         # console.log(f"Comparing {right1[:min_len_right]} and {left2_rc[:min_len_right]}")
         if right1[:min_len_right] != left2_rc[:min_len_right]:
-
             console.log("[bold red]Error: Forward and reverse right flanking sequences are not reverse complements.[/bold red]")
             sys.exit(1)
-
-        min_junction_len = min(min_len_left, min_len_right) 
-        left1, right1 = left1[-min_junction_len:], right1[:min_junction_len] if left1 and right1 else None
-        left2, right2 = left2[-min_junction_len:], right2[:min_junction_len] if left2 and right2 else None
 
     # Update barcodes
     console.log("Associating barcodes with read junctions...")
@@ -366,7 +415,7 @@ def main(args):
     barcode_length = len(next(iter(barcodes)))
 
     console.log("Executing high-throughput read analysis...")
-    chunk_generator = read_fastq_in_chunks(args.fastq1, args.fastq2 if is_paired_end else None, yield_first=False)
+    chunk_generator = read_in_chunks(args.fastq1, args.fastq2 if is_paired_end else None, yield_first=False)
 
     # Create argument generator
     args_generator = ((chunk, barcodes, barcode_start1, barcode_start2, barcode_length, left1, right1, left2, right2, need_swap) for chunk in chunk_generator)
@@ -445,7 +494,6 @@ def main(args):
     if left2 and right2:
         combined_table.add_row("Reverse Junction", f"[bold]{left2}...{right2}[/bold]")
 
-
     # Numeric Statistics Sub-heading
     combined_table.add_section()
     combined_table.add_row("[bold bright_green]Barcode Alignment Stats[/bold bright_green]", "")
@@ -495,4 +543,3 @@ if __name__ == "__main__":
     parser.add_argument('fastq2', type=str, nargs='?', default=None, help='Second FASTQ file (optional).')
     args = parser.parse_args()
     main(args)
-
