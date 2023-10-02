@@ -9,6 +9,8 @@ pysam = "*"
 rich = "*"
 biopython = "*"
 tabulate = "*"
+zstandard = "*"
+pyzstd = "*"
 
 [dev-packages]
 

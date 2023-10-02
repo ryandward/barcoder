@@ -277,7 +277,7 @@ def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_lengt
 
     return (counts, len(reads1) if reads1 else len(reads2))
 
-def find_start_positions(reads, barcodes, barcode_length, is_read2=False):
+def find_start_positions(reads, barcodes, barcode_length, reverse_strand=False):
     """
     Find the start positions of barcodes in a chunk of DNA sequences.
 
@@ -285,7 +285,7 @@ def find_start_positions(reads, barcodes, barcode_length, is_read2=False):
     - reads: List of DNA sequences.
     - barcodes: Set of valid barcode sequences.
     - barcode_length: Length of barcode sequences.
-    - is_read2: Boolean indicating whether the reads belong to file2 (for reverse complement processing).
+    - reverse_strand: Boolean indicating whether the reads belong to file2 (for reverse complement processing).
 
     Returns:
     - The most common start position of barcodes in the provided reads.
@@ -294,7 +294,7 @@ def find_start_positions(reads, barcodes, barcode_length, is_read2=False):
     - This function handles both file1 and file2 reads.
     - It counts barcode occurrences at different start positions.
     - Returns the most common start position of barcodes.
-    - If `is_read2` is True, it performs reverse complement processing.
+    - If `reverse_strand` is True, it performs reverse complement processing.
     """
     if reads is None:
         return None
@@ -304,7 +304,7 @@ def find_start_positions(reads, barcodes, barcode_length, is_read2=False):
 
         for i in range(len(read) - barcode_length + 1):
             kmer = read[i:i+barcode_length]
-            if is_read2:
+            if reverse_strand:
                 kmer = str(Seq(kmer).reverse_complement())
             if kmer in barcodes:
                 offset_counts[i] += 1
@@ -361,7 +361,7 @@ def main(args):
     # For paired-end or single-end that needed a swap
     if sample2:
         console.log("Finding reverse coordinates...")
-        barcode_start2 = find_start_positions(sample2, barcodes, barcode_length, is_read2=True)
+        barcode_start2 = find_start_positions(sample2, barcodes, barcode_length, reverse_strand=True)
         if barcode_start2 is None:
             console.log("[bold red]No barcodes found in sample 2. Exiting.[/bold red]")
             sys.exit(1)
