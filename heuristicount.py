@@ -6,6 +6,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime
+from itertools import chain
 from multiprocessing import Pool, cpu_count
 
 import rich
@@ -75,6 +76,48 @@ def read_fastq(fastq1_file, fastq2_file, num_threads):
         chunk_size = len(reads1) // num_threads
         return [(reads1[i:i+chunk_size], None) for i in range(0, len(reads1), chunk_size)]
 
+from contextlib import nullcontext
+
+
+def read_fastq_in_chunks(file1, file2=None, chunk_size=256, yield_first=False):
+    reads1, reads2 = [], []
+    
+    open_fn = gzip.open if file1.endswith('.gz') else open
+    open_fn2 = gzip.open if file2 and file2.endswith('.gz') else open
+    
+    with open_fn(file1, 'rt') as f1, (open_fn2(file2, 'rt') if file2 else nullcontext()) as f2:
+        iters = [iter(f1), iter(f2) if f2 else iter([])]
+        
+        while True:
+            try:
+                next(iters[0])  # Skip @SEQUENCE_ID
+                reads1.append(next(iters[0]).strip())  # Capture SEQUENCE
+                next(iters[0])  # Skip +
+                next(iters[0])  # Skip QUALITY
+                        
+                if file2:
+                    next(iters[1])  # Skip @SEQUENCE_ID
+                    reads2.append(next(iters[1]).strip())  # Capture SEQUENCE
+                    next(iters[1])  # Skip +
+                    next(iters[1])  # Skip QUALITY
+                    
+                if yield_first and len(reads1) >= chunk_size:
+                    yield (reads1[:chunk_size], reads2[:chunk_size] if reads2 else None)
+                    reads1, reads2 = reads1[chunk_size:], reads2[chunk_size:] if reads2 else []
+                    yield_first = False  # So it doesn't yield_first again
+                    
+                elif len(reads1) >= chunk_size:
+                    yield (reads1[:chunk_size], reads2[:chunk_size] if reads2 else None)
+                    reads1, reads2 = reads1[chunk_size:], reads2[chunk_size:] if reads2 else []
+
+                    
+            except StopIteration:
+                break
+                
+    if reads1:
+        yield (reads1, reads2 if reads2 else None)
+
+
 def count_barcodes(seq, barcode_length, barcodes):
     # Generate k-mers and count matches with barcodes
     kmers = {seq[i:i + barcode_length] for i in range(len(seq) - barcode_length + 1)}
@@ -84,7 +127,7 @@ def determine_forward_read(sample1, sample2, barcodes):
     barcode_length = len(next(iter(barcodes)))
     count1, count2 = 0, 0
 
-    for i in range(min(250, len(sample1))):
+    for i in range(min(256, len(sample1))):
         seq1 = sample1[i]
         seq2 = sample2[i] if sample2 else None  # seq2 is None for single-end
 
@@ -92,7 +135,7 @@ def determine_forward_read(sample1, sample2, barcodes):
         count1 += count_barcodes(seq1, barcode_length, barcodes)
         
         # Early exit if count1 is overwhelmingly large
-        if count1 > 125:
+        if count1 > 128:
             return False
         
         # For paired-end or reverse complement of single-end
@@ -101,7 +144,7 @@ def determine_forward_read(sample1, sample2, barcodes):
             count2 += count_barcodes(seq2, barcode_length, barcodes)
             
             # Early exit if count2 is overwhelmingly large
-            if count2 > 125:
+            if count2 > 128:
                 return True
         else:
             # Count barcode matches in reverse complement of seq1
@@ -109,7 +152,7 @@ def determine_forward_read(sample1, sample2, barcodes):
             count2 += count_barcodes(seq1_rc, barcode_length, barcodes)
             
             # Early exit if count2 is overwhelmingly large
-            if count2 > 125:
+            if count2 > 128:
                 return True
 
     # True if more barcodes found in seq2 or reverse complement of seq1
@@ -123,7 +166,7 @@ def find_ends(reads, start, length, reverse_strand=False):
     # Initialize Counters for left and right flanking regions
     lefts, rights = Counter(), Counter()
 
-    for read in reads[:250]:
+    for read in reads[:256]:
         max_left = min(max_left, start)
         max_right = min(max_right, len(read) - (start + length))
 
@@ -143,9 +186,17 @@ def find_ends(reads, start, length, reverse_strand=False):
 
     return left_most_common, right_most_common
 
-def process_chunk(chunk, barcodes, barcode_start1=None, barcode_start2=None, barcode_length=None, left1=None, right1=None, left2=None, right2=None):
+def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_length, left1, right1, left2, right2, need_swap):
     reads1, reads2 = chunk
+
+    if need_swap:
+        reads1, reads2 = reads2, reads1
+
     counts = defaultdict(int)
+    left1_len = len(left1) if left1 else 0
+    right1_len = len(right1) if right1 else 0
+    left2_len = len(left2) if left2 else 0
+    right2_len = len(right2) if right2 else 0
 
     if reads1 and reads2:  # Paired-end processing
         for rec1, rec2 in zip(reads1, reads2):
@@ -154,43 +205,41 @@ def process_chunk(chunk, barcodes, barcode_start1=None, barcode_start2=None, bar
             candidate2_rc = candidate2[::-1].translate(str.maketrans("ATCGN", "TAGCN"))
             if candidate2_rc == candidate1:
                 if candidate1 in barcodes:
-                    counts[candidate1[len(left1):-len(right1) or None]] += 1
-                else:
-                    if candidate1.startswith(left1) and candidate1.endswith(right1):
-                        barcode = candidate1[len(left1):-len(right1) or None] + "*"  
-                        counts[barcode] += 1
+                    counts[candidate1[left1_len:-right1_len or None]] += 1
+                elif candidate1.startswith(left1 or '') and candidate1.endswith(right1 or ''):
+                    barcode = candidate1[left1_len:-right1_len or None] + "*"  
+                    counts[barcode] += 1
 
     elif reads1:  # Single-end processing, forward orientation
         for rec1 in reads1:
             candidate1 = rec1[barcode_start1:barcode_start1 + barcode_length]
             if candidate1 in barcodes:
-                counts[candidate1[len(left1):-len(right1) or None]] += 1
-            else:
-                if candidate1.startswith(left1) and candidate1.endswith(right1):
-                    barcode = candidate1[len(left1):-len(right1) or None] + "*"  
-                    counts[barcode] += 1
+                counts[candidate1[left1_len:-right1_len or None]] += 1
+            elif candidate1.startswith(left1 or '') and candidate1.endswith(right1 or ''):
+                barcode = candidate1[left1_len:-right1_len or None] + "*"  
+                counts[barcode] += 1
 
     elif reads2:  # Single-end processing, reverse complement
         for rec2 in reads2:
             candidate2 = rec2[barcode_start2:barcode_start2 + barcode_length]
             candidate2_rc = candidate2[::-1].translate(str.maketrans("ATCGN", "TAGCN"))
             if candidate2 in barcodes:
-                counts[candidate2_rc[len(right2):-len(left2) or None]] += 1
-            else:
-                # print(candidate2, left2, right2, file=sys.stderr)
-                if candidate2.startswith(left2) and candidate2.endswith(right2):
-                    barcode = candidate2_rc[len(right2):-len(left2) or None] + "*"  
-                    counts[barcode] += 1
+                counts[candidate2_rc[right2_len:-left2_len or None]] += 1
+            elif candidate2.startswith(left2 or '') and candidate2.endswith(right2 or ''):
+                barcode = candidate2_rc[right2_len:-left2_len or None] + "*"  
+                counts[barcode] += 1
     
-    return counts
+    if reads1 and reads2 and len(reads1) != len(reads2):
+        raise ValueError("Length of reads1 and reads2 should be the same for paired-end data.")
 
+    return (counts, len(reads1) if reads1 else len(reads2))
 
 def find_start_positions(reads, barcodes, barcode_length, is_read2=False):
     if reads is None:
         return None
     
     offset_counts = Counter()
-    for read in reads[:250]:
+    for read in reads[:256]:
 
         for i in range(len(read) - barcode_length + 1):
             kmer = read[i:i+barcode_length]
@@ -202,7 +251,7 @@ def find_start_positions(reads, barcodes, barcode_length, is_read2=False):
 
 def main(args):
     console = Console(stderr=True, highlight=True)
-    console.log("[bold red]Initializing heuristic barcode counting")
+    console.log("[bold red]Initializing heuristic barcode counting[/bold red]...")
 
     num_threads = cpu_count()
 
@@ -214,16 +263,19 @@ def main(args):
     is_paired_end = bool(args.fastq2)
     
     # Reading FASTQ Files
-    console.log("Reading results from FASTQ...")
-    chunks = read_fastq(args.fastq1, args.fastq2 if is_paired_end else None, num_threads)
-    sample1, sample2 = chunks[0]
+    console.log("Sampling initial reads for orientation...")
+    # chunks = read_fastq(args.fastq1, args.fastq2 if is_paired_end else None, num_threads)
+    # sample1, sample2 = chunks[0]
+    chunk_generator = read_fastq_in_chunks(args.fastq1, args.fastq2 if is_paired_end else None, yield_first=True)
+    first_chunk = next(chunk_generator)
+    sample1, sample2 = first_chunk
 
     # Initialize
     need_swap = False  
 
     # Determine if a swap is needed
     if is_paired_end:
-        console.log("Finding orientation of paired-end reads...")
+        console.log("Determining orientation of paired-end reads...")
         need_swap = determine_forward_read(sample1, sample2, barcodes)
     else:
         console.log("Determining orientation of single-end reads...")
@@ -231,14 +283,8 @@ def main(args):
 
     # Apply the swap logic
     if need_swap:
-        if is_paired_end:
-            chunks = [(reads2, reads1) for reads1, reads2 in chunks]
-        else:
-            # For single-end reads, make them the new 'sample2' by leaving 'sample1' as None
-            chunks = [(None, reads1) for reads1, _ in chunks]
+        sample1, sample2 = sample2, sample1
 
-    # Always get sample1 and sample2 from the first chunk
-    sample1, sample2 = chunks[0]
 
     # Initialize to None
     barcode_start1 = None
@@ -254,7 +300,7 @@ def main(args):
 
     # For paired-end or single-end that needed a swap
     if sample2:
-        console.log("Finding reverse coordinates")
+        console.log("Finding reverse coordinates...")
         barcode_start2 = find_start_positions(sample2, barcodes, barcode_length, is_read2=True)
         if barcode_start2 is None:
             console.log("[bold red]No barcodes found in sample 2. Exiting.[/bold red]")
@@ -262,21 +308,25 @@ def main(args):
     else:
         barcode_start2 = None
 
+    # console.log(f"Forward barcode start: {barcode_start1}", f"Reverse barcode start: {barcode_start2}", sep='\n')
+
     
     # Find flanking sequences
     if sample1 is not None:
-        console.log("Finding forward junctions...")
+        console.log("Identifying forward read junctions...")
         left1, right1 = find_ends(sample1, barcode_start1, barcode_length)
         barcode_start1 -= len(left1) if left1 else 0
     else:
         left1, right1 = None, None
 
     if sample2 is not None:
-        console.log("Finding reverse junctions...")
+        console.log("Identifying reverse read junctions...")
         left2, right2 = find_ends(sample2, barcode_start2, barcode_length, reverse_strand=True)
         barcode_start2 -= len(left2) if left2 else 0
     else:
         left2, right2 = None, None
+
+    # console.log(f"Barcode length = {barcode_length}, Forward junction: {left1}...{right1}", f"Reverse junction: {left2}...{right2}", sep='\n')
 
    # Calculate reverse complements
     left2_rc = left2[::-1].translate(str.maketrans("ATCGN", "TAGCN")) if left2 else None
@@ -288,7 +338,7 @@ def main(args):
 
     if left1 and right2_rc:
         min_len_left = min(len(left1), len(right2_rc))
-        console.log(f"Comparing {left1[-min_len_left:]} and {right2_rc[:min_len_left]}")
+        # console.log(f"Comparing {left1[-min_len_left:]} and {right2_rc[:min_len_left]}")
         if left1[-min_len_left:] != right2_rc[:min_len_left]:
 
             console.log("[bold red]Error: Forward and reverse left flanking sequences are not reverse complements.[/bold red]")
@@ -297,7 +347,7 @@ def main(args):
 
     if right1 and left2_rc:
         min_len_right = min(len(right1), len(left2_rc))
-        console.log(f"Comparing {right1[:min_len_right]} and {left2_rc[:min_len_right]}")
+        # console.log(f"Comparing {right1[:min_len_right]} and {left2_rc[:min_len_right]}")
         if right1[:min_len_right] != left2_rc[:min_len_right]:
 
             console.log("[bold red]Error: Forward and reverse right flanking sequences are not reverse complements.[/bold red]")
@@ -308,34 +358,37 @@ def main(args):
         left2, right2 = left2[-min_junction_len:], right2[:min_junction_len] if left2 and right2 else None
 
     # Update barcodes
-    console.log("Mapping junctions to barcodes...")
+    console.log("Associating barcodes with read junctions...")
     if left1 and right1:
         barcodes = {left1 + barcode + right1 for barcode in barcodes}
     elif left2 and right2:
         barcodes = {left2 + barcode[::-1].translate(str.maketrans("ATCGN", "TAGCN")) + right2 for barcode in barcodes}
     barcode_length = len(next(iter(barcodes)))
 
-     # Processing Chunks
-    console.log("Counting barcodes at junctions...")
+    console.log("Executing high-throughput read analysis...")
+    chunk_generator = read_fastq_in_chunks(args.fastq1, args.fastq2 if is_paired_end else None, yield_first=False)
+
+    # Create argument generator
+    args_generator = ((chunk, barcodes, barcode_start1, barcode_start2, barcode_length, left1, right1, left2, right2, need_swap) for chunk in chunk_generator)
+
+    # Execute multiprocessing
     with Pool(num_threads) as pool:
-        results = pool.starmap(process_chunk, [(chunk, barcodes, barcode_start1, barcode_start2, barcode_length, left1, right1, left2, right2) for chunk in chunks])
-
-
+        results = pool.starmap(process_chunk, args_generator)
     # Collating Results
-    console.log("Preparing results...")
+    console.log("[bold red]Collating results[/bold red]...")
     
     documented_barcodes = Counter()
     undocumented_barcodes = Counter()
 
-    for result in results:
+    total_reads = 0
+
+    for result, chunk_size in results:
+        total_reads += chunk_size
         for barcode, count in result.items():
             if barcode.endswith('*'):
                 undocumented_barcodes[barcode] += count
             else:
                 documented_barcodes[barcode] += count
-
-
-    total_reads = sum(len(chunk[0]) if chunk[0] is not None else len(chunk[1]) for chunk in chunks)
 
     if is_paired_end:
         fastq1_filename = os.path.basename(args.fastq1) if not need_swap else os.path.basename(args.fastq2)
