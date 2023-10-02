@@ -3,6 +3,10 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 import pyzstd
 
+def compress_and_write(output_file):
+    with open(output_file, 'rb') as f_in, pyzstd.open(output_file + '.zst', 'wb') as f_out:
+        f_out.write(f_in.read())
+
 def parallel_sort(paired_reads):
     chunk_size = len(paired_reads) // 4
     chunks = [paired_reads[i:i + chunk_size] for i in range(0, len(paired_reads), chunk_size)]
