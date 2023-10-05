@@ -39,17 +39,6 @@ def sorter(input_queues, sorted_chunks_queue, read_complete_events, sort_complet
         if all_queues_empty:
             print(f"Sorter {multiprocessing.current_process().name} detected all queues are empty.")
 
-        # if all_readers_done and all_queues_empty:
-        #     print(f"Sorter {multiprocessing.current_process().name} exiting main loop.")
-        #     break
-        #     # Wait for all readers to have at least one chunk or be done
-        
-        
-        while not all([not q.empty() for q in input_queues]) and not all([event.is_set() for event in read_complete_events]):
-            sleep_duration = random.uniform(0, 1)  # This will give you a random float between 0 and 1
-            time.sleep(sleep_duration)
-            pass
-        
         # Check if all readers are done and all queues are empty
         if all([event.is_set() for event in read_complete_events]) and all([q.empty() for q in input_queues]):
             break
@@ -61,7 +50,6 @@ def sorter(input_queues, sorted_chunks_queue, read_complete_events, sort_complet
                 # Get chunks from all queues to create tuples
                 chunks = [q.get() for q in input_queues]
                 print(f'Sorter {multiprocessing.current_process().name} got chunks of size: ', [len(chunk) for chunk in chunks]) 
-
                  
             # Create tuples for sorting
             tuples_to_sort = list(zip(*chunks))
