@@ -1,88 +1,87 @@
+import multiprocessing
 import gzip
 import sys
-from concurrent.futures import ThreadPoolExecutor
-import pyzstd
 
+def read_file(filename, queue, read_complete_event):
+    sequences = []
+    count = 0
 
-def compress_and_write(output_file):
-    with open(output_file, 'rb') as f_in, pyzstd.open(output_file + '.zst', 'wb') as f_out:
-        f_out.write(f_in.read())
+    with gzip.open(filename, 'rt') as f:
+        for line in f:
+            count += 1
+            if count % 4 == 2:
+                sequences.append(line.strip())
+                if len(sequences) == 40000000:
+                    queue.put(sequences.copy())
+                    sequences.clear()
 
+    if sequences:
+        queue.put(sequences)
+    read_complete_event.set()
 
-def parallel_sort(paired_reads):
-    chunk_size = len(paired_reads) // 4
-    chunks = [paired_reads[i:i + chunk_size] for i in range(0, len(paired_reads), chunk_size)]
-    
-    with ThreadPoolExecutor() as executor:
-        sorted_chunks = list(executor.map(sorted, chunks))
-        
-    return sorted_chunks
-
-
-def merge_sorted_chunks(sorted_chunks):
-    from heapq import merge
-    return list(merge(*sorted_chunks))
-
-
-def read_and_process(*files):
-    sampled_paired_reads = []
-    remaining_paired_reads = []
-
-    file_handles = [gzip.open(file, 'rt') for file in files]
-    
-    for _ in range(1000):
-        read_tuple = []
-        for f in file_handles:
-            f.readline()
-            seq = f.readline().strip()
-            f.readline()
-            f.readline()
-            read_tuple.append(seq)
-        
-        sampled_paired_reads.append(tuple(read_tuple))
-    
+def sorter(input_queues, output_queues, read_complete_events):
     while True:
-        read_tuple = []
-        for f in file_handles:
-            f.readline()
-            seq = f.readline().strip()
-            f.readline()
-            f.readline()
-            read_tuple.append(seq)
+        # Wait for all readers to have at least one chunk or be done
+        while not all([not q.empty() for q in input_queues]) and not all([event.is_set() for event in read_complete_events]):
+            pass
 
-        if not all(read_tuple):
+        # Check if all readers are done and all queues are empty
+        if all([event.is_set() for event in read_complete_events]) and all([q.empty() for q in input_queues]):
             break
 
-        remaining_paired_reads.append(tuple(read_tuple))
+        # Get chunks from all queues to create tuples
+        chunks = [q.get() for q in input_queues]
 
-    for f in file_handles:
-        f.close()
-        
-    sorted_chunks = parallel_sort(remaining_paired_reads)
-    sorted_remaining_paired_reads = merge_sorted_chunks(sorted_chunks)
+        # Create tuples for sorting
+        tuples_to_sort = list(zip(*chunks))
 
-    final_paired_reads = sampled_paired_reads + sorted_remaining_paired_reads
+        # Sort the tuples
+        sorted_tuples = sorted(tuples_to_sort)
 
-    output_files = [file.replace(".fastq.gz", ".reads") for file in files]
-    
-    with open(output_files[0], "wb") as out1:
-        for read_tuple in final_paired_reads:
-            out1.write(f"{read_tuple[0]}\n".encode())
-            
-    for i, output_file in enumerate(output_files[1:], start=1):
-        with open(output_file, "wb") as out:
-            for read_tuple in final_paired_reads:
-                out.write(f"{read_tuple[i]}\n".encode())
-                
-        compress_and_write(output_file)
-        
-    compress_and_write(output_files[0])
+        # Split the tuples and put in respective output queues
+        for i, queue in enumerate(output_queues):
+            queue.put([tup[i] for tup in sorted_tuples])
+    # Signal completion to writers
+    for q in output_queues:
+        q.put(None)
 
+
+def write_output(queue, filename, read_complete_event):
+    sequences = []
+    while True:
+        chunk = queue.get()
+        if chunk is None:  # Check for end signal
+            break
+        sequences.extend(chunk)
+
+    with open(filename.replace('.fastq.gz', '.reads'), 'w') as f:
+        for seq in sequences:
+            f.write(seq + '\n')
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python convert_to_reads.py file1.fastq.gz [file2.fastq.gz ...]")
-        sys.exit(1)
+    filenames = sys.argv[1:]
+    manager = multiprocessing.Manager()
 
-    files = sys.argv[1:]
-    read_and_process(*files)
+    queues = [manager.Queue() for _ in filenames]
+    read_complete_events = [multiprocessing.Event() for _ in filenames]
+    output_queues = [manager.Queue() for _ in filenames]
+
+    readers = [multiprocessing.Process(target=read_file, args=(filename, queue, event)) for filename, queue, event in zip(filenames, queues, read_complete_events)]
+    sorter_process = multiprocessing.Process(target=sorter, args=(queues, output_queues, read_complete_events))
+    writers = [multiprocessing.Process(target=write_output, args=(queue, filename, event)) for queue, filename, event in zip(output_queues, filenames, read_complete_events)]
+
+    for r in readers:
+        r.start()
+    
+    sorter_process.start()
+
+    for w in writers:
+        w.start()
+
+    for r in readers:
+        r.join()
+
+    sorter_process.join()
+
+    for w in writers:
+        w.join()
