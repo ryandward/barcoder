@@ -3,116 +3,155 @@ import heapq
 import multiprocessing
 import queue
 import random
-import sys
+import sys  # Needed for the exit function
 import time
+from heapq import heappop, heappush
 from queue import Empty
-from rich.progress import track
+
 import pyzstd
 from rich import console
 from rich.console import group
 from rich.panel import Panel
-from rich.progress import Progress
+from rich.progress import Progress, track
+
 
 def read_file(filename, read_start_event, queue, reader_barrier, read_complete_event):
     read_start_event.set()
     sequences = []
     count = 0
 
+    chunk_number = 0
     with gzip.open(filename, 'rt') as f:
         for line in f:
             count += 1
             if count % 4 == 2:
                 sequences.append(line.strip())
-                if len(sequences) == 1048576*2:
-                    queue.put(sequences.copy())
-                    console.log(f"Reader {multiprocessing.current_process().name} completed reading chunk of size: ", len(sequences), style="bold green")
-                    sequences.clear()
+                
+                if len(sequences) == 1000000:
                     reader_barrier.wait()
-                    console.log(f"Reader {multiprocessing.current_process().name} proceeding to read next chunk", style="bold yellow")
+                    queue.put((chunk_number, sequences.copy()))
+                    chunk_number += 1
+                    sequences.clear()
+                    console.log(f"[bold purple]Reader {multiprocessing.current_process().name}[/bold purple] proceeding to read next chunk", style="yellow")
 
     if sequences:
-        queue.put(sequences)
+        reader_barrier.wait()
+        queue.put((chunk_number, sequences.copy()))  # Added the chunk_number metadata here
+        console.log(f"[bold purple]Reader {multiprocessing.current_process().name}[/bold purple] completed reading chunk of size: ", len(sequences), style="green")
+        sequences.clear()
+
 
     # Signal the completion of the entire read for this reader
     read_complete_event.set()
-    console.log(f"Reader {multiprocessing.current_process().name} completed all reads, shutting down.", style="bold red")
+    console.log(f"[bold purple]Reader {multiprocessing.current_process().name}[/bold purple] completed all reads, shutting down.", style="red")
 
-def sorter(input_queues, sorted_chunks_queue, read_complete_events, sort_complete_event, sorter_lock):
-    # console.log(f"Sorter {multiprocessing.current_process().name} started.")
-    
+
+
+def sorter(input_queues, sorted_chunks_queue, read_complete_events, sort_complete_event, sorter_lock):    
     while True:
         all_queues_empty = all([q.empty() for q in input_queues])
         all_readers_done = all([event.is_set() for event in read_complete_events])
 
-        # If all queues are empty and all readers are done, break out of the loop
         if all_queues_empty and all_readers_done:
             break
 
         chunks = []
+
         with sorter_lock:
             try:
-                # Try to get chunks from all queues with a timeout
-                chunks = [q.get(timeout = 1) for q in input_queues]
+                chunk_tuples = [q.get(timeout = 0.5) for q in input_queues]
+                
+                # Separate the chunk_number from the data
+                chunk_numbers, chunks = zip(*chunk_tuples)
+                
+                # Check if all chunk_numbers are the same. If not, there's an error.
+                if len(set(chunk_numbers)) != 1:
+                    console.log(f"[bold white]Sorter {multiprocessing.current_process().name}[/bold white] encountered mismatched chunk_numbers.", style="red")
+                    continue
+
                 tuples_to_sort = list(zip(*chunks))
-                console.log(f"Sorter {multiprocessing.current_process().name} got chunks of sizes: {', '.join(map(str, [len(chunk) for chunk in chunks]))}", style="bold yellow")
-                # Create tuples for sorting
+                console.log(f"[bold white]Sorter {multiprocessing.current_process().name}[/bold white] got chunks of sizes: {', '.join(map(str, [len(chunk) for chunk in chunks]))} with chunk_number {chunk_numbers[0]}", style="yellow")
             except queue.Empty:
                 continue
-   
-        # Sort the tuples
+
         sorted_tuples = sorted(tuples_to_sort)
-        # Send the sorted tuples to the merger
         sorted_chunks_queue.put(sorted_tuples)
         
-        console.log(f"Sorter {multiprocessing.current_process().name} completed sorting chunk sizes: {', '.join(map(str, [len(chunk) for chunk in chunks]))}", style="bold green")
+        console.log(f"[bold white]Sorter {multiprocessing.current_process().name}[/bold white] completed sorting chunk sizes: {', '.join(map(str, [len(chunk) for chunk in chunks]))}", style="green")
 
     sort_complete_event.set()
-    console.log(f"Sorter {multiprocessing.current_process().name} completed all sorting, shutting down.", style="bold red")
-
-def k_way_merge(chunks):
-    merged = []
-    heap = []
-
-    for idx, chunk in enumerate(chunks):
-        if chunk:  # If chunk is not empty
-            heapq.heappush(heap, (chunk[0], idx, 0))
-    
-    while heap:
-        val, chunk_idx, element_idx = heapq.heappop(heap)
-        merged.append(val)
-        
-        if element_idx + 1 < len(chunks[chunk_idx]):
-            next_val = chunks[chunk_idx][element_idx + 1]
-            heapq.heappush(heap, (next_val, chunk_idx, element_idx + 1))
-    
-    return merged
+    console.log(f"[bold white]Sorter {multiprocessing.current_process().name}[/bold white] completed all sorting, shutting down.", style="red")
 
 def merger(sorted_chunks_queue, output_queues, sort_complete_events, merger_done_event):
+    heap = []  # Local heap to manage chunks based on their sizes
+    
     total_sorters = len(sort_complete_events)
     finished_sorters = 0
-    merged_data = []  # This will hold the continuously merged data
+    
+    while finished_sorters < total_sorters or sorted_chunks_queue.qsize() >= 2 or len(heap) >= 2:
+        queue_chunks = []
+        finished_sorters = sum([event.is_set() for event in sort_complete_events])
 
-    while finished_sorters < total_sorters:
-        try:
-            chunk = sorted_chunks_queue.get(timeout = 1)
-            if chunk:
-                console.log(f"Merger {multiprocessing.current_process().name} got chunk of size: {len(chunk)}", style="bold yellow")
-                
-                # Merge the current chunk with the existing merged_data
-                merged_data = sorted(merged_data + chunk)
-                console.log(f"Merger {multiprocessing.current_process().name} merged data size: {len(merged_data)}", style="bold green")
-                
-        except Empty:
-            finished_sorters = sum([event.is_set() for event in sort_complete_events])
+        # If there are 2 or more chunks in the queue, merge them first
+        if sorted_chunks_queue.qsize() >= 2:
+            console.log("A")
+            chunks_got = 0
+            while not sorted_chunks_queue.empty():
+                chunk = sorted_chunks_queue.get()
+                queue_chunks.extend(chunk)
+                chunks_got+=1
 
-    # Splitting tuples into separate lists for final output
-    separated_lists = list(zip(*merged_data))
-    for i, q in enumerate(output_queues):
-        console.log(f"Merger {multiprocessing.current_process().name} sending chunk of size: {len(separated_lists[i])} to writer queue.", style="bold yellow")
-        q.put(separated_lists[i])
-        console.log(f"Merger {multiprocessing.current_process().name} sent chunk of size: {len(separated_lists[i])} to writer queue.", style="bold green")
+        if queue_chunks:
+            console.log("B")
+            queue_merged_chunk = sorted(queue_chunks)
+            console.log(f"[bold blue]Merger {multiprocessing.current_process().name}[/bold blue] merged {chunks_got} queue chunks from queue.", style="green")
+            heappush(heap, (len(queue_merged_chunk), queue_merged_chunk))
+
+        elif len(heap) >= 2:
+            console.log("C")
+            _, chunk1 = heappop(heap)
+            _, chunk2 = heappop(heap)
+            merged_chunk = sorted(chunk1 + chunk2)
+            console.log(f"[bold blue]Merger {multiprocessing.current_process().name}[/bold blue] merged heap chunks of sizes: {len(chunk1)}, {len(chunk2)}", style="green")
+            heappush(heap, (len(merged_chunk), merged_chunk))
+            continue
+
+    # Check if any sorters have completed
+        # console.log("D")
+    if(finished_sorters == total_sorters):
+        console.log("D")
+        console.log(f"[bold blue]Merger {multiprocessing.current_process().name}[/bold blue] detected all sorters have completed.", style="yellow")
+            # When the heap contains only 1 chunk, check the queue one last time
+    while not sorted_chunks_queue.empty():
+        console.log("E")
+        chunk = sorted_chunks_queue.get()
+        heappush(heap, (len(chunk), chunk))
+        console.log(f"[bold blue]Merger {multiprocessing.current_process().name}[/bold blue] pulled chunk from queue to the heap.", style="green")
+
+    # Merge remaining chunks from the heap
+    while len(heap) > 1:
+        console.log("F")    
+        _, chunk1 = heappop(heap)
+        _, chunk2 = heappop(heap)
+        merged_chunk = sorted(chunk1 + chunk2)
+        console.log(f"[bold blue]Merger {multiprocessing.current_process().name}[/bold blue] merged heap chunks of sizes: {len(chunk1)}, {len(chunk2)}", style="green")
+        heappush(heap, (len(merged_chunk), merged_chunk))
+
+    console.log(f"[bold blue]Merger {multiprocessing.current_process().name}[/bold blue] completed merging. Final chunk size: {len(heap[0][1]) if heap else 0}.", style="green")
+
+    # Directly pop from heap, split the data, and send to the output queues
+    while heap:
+        console.log("G")
+        console.log(f"[bold blue]Merger {multiprocessing.current_process().name}[/bold blue] is preparing to send data to writers.", style="yellow")
+        _, chunk = heappop(heap)
+        separated_lists = list(zip(*chunk))
+        console.log(f"[bold blue]Merger {multiprocessing.current_process().name}[/bold blue] separated chunk of size: ", len(chunk), style="green")
+        for i, q in enumerate(output_queues):
+            q.put(separated_lists[i])
+            console.log(f"[bold blue]Merger {multiprocessing.current_process().name}[/bold blue] sent chunk of size: ", len(separated_lists[i]), style="green")
+    
     merger_done_event.set()
-    console.log(f"Merger {multiprocessing.current_process().name} completed all merging, shutting down.", style="bold red")
+
 
 
 def write_output(queue, filename, merger_done_event):
@@ -124,7 +163,7 @@ def write_output(queue, filename, merger_done_event):
         try:
             chunk = queue.get(timeout = 1)  # Try to get data from the queue with a timeout
             sequences.extend(chunk)
-            console.log(f"{filename.replace('.fastq.gz', '.reads.zst')} writer {multiprocessing.current_process().name} got chunk of size: ", len(chunk), style="bold yellow")
+            console.log(f"{filename.replace('.fastq.gz', '.reads.zst')} writer {multiprocessing.current_process().name} got chunk of size: ", len(chunk), style="yellow")
         except Empty:  # If no data is available in the timeout period
             if queue.empty():  # If the queue is empty, break out of the loop
                 break
@@ -134,11 +173,11 @@ def write_output(queue, filename, merger_done_event):
         for seq in sequences:
             f.write((seq + '\n').encode())
     
-    console.log(f"{filename.replace('.fastq.gz', '.reads.zst')} writer {multiprocessing.current_process().name} completed writing, shutting down.", style="bold red")
+    console.log(f"{filename.replace('.fastq.gz', '.reads.zst')} writer {multiprocessing.current_process().name} completed writing, shutting down.", style="red")
 
 if __name__ == "__main__":
     # Configuration
-    num_sorters = 12
+    num_sorters = 5
     filenames = sys.argv[1:]
 
     from rich.console import Console
