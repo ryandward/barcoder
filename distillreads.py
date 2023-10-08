@@ -8,6 +8,7 @@ import time
 from heapq import heappop, heappush
 from queue import Empty
 
+import psutil
 import pyzstd
 from rich import console
 from rich.console import group
@@ -16,85 +17,115 @@ from rich.progress import Progress, track
 
 #import defaultdict
 from collections import defaultdict
+import psutil
 
-def read_file(filename, chunk_complete_sem, queue, reader_barrier, read_complete_event):
+def zstd_compress(sequences):
+    data = '\n'.join(sequences)
+    compressed_data = pyzstd.compress(data.encode('utf-8'))
+    return compressed_data
+
+def zstd_decompress(compressed_data):
+    decompressed_data = pyzstd.decompress(compressed_data).decode('utf-8')
+    return decompressed_data.split('\n')  
+
+def check_memory_usage(percentage=True):
+    memory_info = psutil.virtual_memory()
+    if percentage:
+        return memory_info.percent
+    else:
+        return memory_info.used / (1024**3)  # Return usage in GB
+
+def check_cpu_usage():
+    return psutil.cpu_percent(interval=1)
+
+
+def read_file(filename, dispatch_queues, read_done_event):
     sequences = []
     count = 0
     chunk_number = 0
     reader_name = f"[bold purple]Reader {mp.current_process().name}[/bold purple]"
     console.log(f"{reader_name} beginning to read: {filename}", style="yellow")
-
     with gzip.open(filename, 'rt') as f:
         for line in f:
             count += 1
             if count % 4 == 2:
                 sequences.append(line.strip())
-                
-                if len(sequences) == 2**19:
-                    queue.put((chunk_number, sequences.copy()))
+                if len(sequences) == 2**20:
+                    compressed_chunk = zstd_compress(sequences.copy())
+                    dispatch_queues.put((chunk_number, compressed_chunk))
                     console.log(f"{reader_name} read {((count//4)):,} sequences, chunk: {chunk_number:,}", style="white")
                     chunk_number += 1
                     sequences.clear()
 
-
     if sequences:
-        queue.put((chunk_number, sequences.copy()))
-        console.log(f"{reader_name} finished at {((count//4)):,} sequenced, chunk: {chunk_number:,}", style="bold green")
+        compressed_chunk = zstd_compress(sequences.copy())
+        dispatch_queues.put((chunk_number, compressed_chunk))
+        console.log(f"{reader_name} read {((count//4)):,} sequences, chunk: {chunk_number:,}", style="white")
+        chunk_number += 1
         sequences.clear()
 
-
     # Signal the completion of the entire read for this reader
-    read_complete_event.set()
-    console.log(f"{reader_name} finished.", style="red")
+    read_done_event.set()
+    if read_done_event.is_set():
+        console.log(f"{reader_name} finished.", style="green")
+    else:
+        console.log(f"{reader_name} failed to finish.", style="bold red")
 
 
-
-def dispatch(dispatch_queues, chunk_complete_sems, sorter_queue, read_complete_events, dispatch_done_event):    
+def dispatch(dispatch_queues, sorter_queue, read_done_events, dispatch_done_event):    
     dispatch_name = f"[bold magenta]Dispatch {mp.current_process().name}[/bold magenta]"
     chunks_dict = defaultdict(list)
+    finished_queues = set()  # a set to store indexes of finished queues
+
 
     while True:
-        all_readers_done = all([event.is_set() for event in read_complete_events])
+        all_readers_done = all([event.is_set() for event in read_done_events])
 
         # Exit condition
-        if all([q.empty() for q in dispatch_queues]) and all_readers_done:
+        if len(finished_queues) == len(dispatch_queues) and sorter_queue.empty():
+            console.log(f"{dispatch_name} confirmed all readers and sorter have finished.", style="yellow")
             break
 
-        # Fetch available chunks from each reader
         for idx, q in enumerate(dispatch_queues):
-    
-            chunk_number, chunk_data = q.get()
-            # Use idx to label the origin of the chunk
-            chunks_dict[chunk_number].append((idx, chunk_data))
-
-        # Check chunks_dict for any complete sets of chunks
-        complete_chunk_numbers = [cn for cn, data in chunks_dict.items() if len(data) == len(dispatch_queues)]
-        
-        for cn in complete_chunk_numbers:
-            # Strip out the index label and sort based on the index to ensure correct order
-            sorted_data = sorted(chunks_dict[cn], key=lambda x: x[0])
-            stripped_data = [item[1] for item in sorted_data]
-            tuples_to_sort = list(zip(*stripped_data))
-            sorter_queue.put(tuples_to_sort)
-
-            sequence_lengths = [len(seq) for seq in stripped_data]
-            console.log(f"{dispatch_name} dispatched a chunk to sorters: {cn} with sequence lengths: {'; '.join(['{:,}'.format(length) for length in sequence_lengths])}", style="green")
-            del chunks_dict[cn]
+            # if this queue's reader is done and the queue is empty, add it to the finished set
+            if read_done_events[idx].is_set() and q.empty():
+                finished_queues.add(idx)
             
-        time.sleep(0.2)
+            # if this queue is not marked as finished, try to get data from it
+            if idx not in finished_queues:
+                try:
+                    chunk_number, compressed_chunk_data = q.get_nowait()  # non-blocking get
+                    chunks_dict[chunk_number].append((idx, compressed_chunk_data))
+                except queue.Empty:
+                    pass  # this means the queue is currently empty, but the reader might add more to it later
 
-    for event in read_complete_events: event.wait()
+        # Check chunks_dict for any done sets of chunks
+        done_chunk_numbers = [chunk_number for chunk_number, data in chunks_dict.items() if len(data) == len(dispatch_queues)]
+        # print(done_chunk_numbers)
+
+        for chunk_number in done_chunk_numbers:
+            # Sort based on the index to ensure correct order and then strip out the index label
+            ordered_chunks = sorted(chunks_dict[chunk_number], key=lambda x: x[0])
+            _, chunk_data = list(zip(*ordered_chunks))
+            sorter_queue.put(chunk_data)  # Sending the entire ordered data, sorters will handle decompression
+
+
+            console.log(f"{dispatch_name} dispatched a chunk to sorters: {chunk_number}.", style="green")
+            del chunks_dict[chunk_number]
+    
+    for event in read_done_events: event.wait()
     dispatch_done_event.set()
-    console.log(f"{dispatch_name} finished.", style="red")
+    if dispatch_done_event.is_set():
+        console.log(f"{dispatch_name} finished.", style="green")
+    else:
+        console.log(f"{dispatch_name} failed to finish.", style="bold red")
 
 
-
-
-def sorter(sorter_queue, chunk_complete_sems, sorted_chunks_queue, read_complete_events, sort_complete_event, sorter_lock):    
+def sorter(sorter_queue, merger_queue, read_done_events, sort_done_event, sorter_lock):    
     sorter_name = f"[bold white]Sorter {mp.current_process().name}[/bold white]"
 
     while True:
-        tuples_to_sort = []
+        dispatch_data = []
         sorter_queue_empty = sorter_queue.empty()
         dispatch_done = dispatch_done_event.is_set()
 
@@ -102,67 +133,68 @@ def sorter(sorter_queue, chunk_complete_sems, sorted_chunks_queue, read_complete
             break
 
         with sorter_lock:
-
             try:
-                tuples_to_sort = sorter_queue.get(timeout = 0.1)
-
+                dispatch_data = sorter_queue.get(timeout=0.1)
             except queue.Empty:
                 pass
-                # console.log(f"{sorter_name} did not retrieve chunks, trying again.", style="yellow")
-                
-            finally:
-                pass
-                # Release semaphores in the finally block to ensure they are always released
 
-        # Moved outside the lock block
-        if tuples_to_sort:  # Checking to ensure there's data to process
-            console.log(f"{sorter_name} starting a chunk: {len(tuples_to_sort[0]):,} x {len(tuples_to_sort):,}", style="yellow")
-            sorted_tuples = sorted(tuples_to_sort)
-            sorted_chunks_queue.put(sorted_tuples)
-            console.log(f"{sorter_name} finished a chunk: {len(tuples_to_sort[0]):,} x {len(tuples_to_sort):,}", style="green")
+        if dispatch_data:
+            sorted_data =  sorted(list(zip(*[zstd_decompress(entry) for entry in dispatch_data])))
+            chunk_size = len(sorted_data)
+            element_sizes = [len(sequence) for sequence in sorted_data[0]]
+            merger_queue.put(sorted_data)
+            console.log(f"{sorter_name} sorted a chunk: {chunk_size:,} x {element_sizes}", style="green")
 
-    for event in read_complete_events: event.wait()
+
+    for event in read_done_events: event.wait()
     dispatch_done_event.wait()
-    sort_complete_event.set()
+    sort_done_event.set()
 
     console.log(f"{sorter_name} finished.", style="red")
 
-
-def merger(sorted_chunks_queue, output_queue_filenames, sort_complete_events, merger_done_event, writer_sems):
+def merger(merger_queue, output_queue_filenames, sort_done_events, merger_done_event, writer_sems):
     heap = []
-    total_sorters = len(sort_complete_events)
+    total_sorters = len(sort_done_events)
     finished_sorters = 0
     merger_name = f"[bold blue]Merger {mp.current_process().name}[/bold blue]"
 
-    while finished_sorters < total_sorters or sorted_chunks_queue.qsize() >= 2 or len(heap) >= 2:
-        queue_chunks = []
-        finished_sorters = sum([event.is_set() for event in sort_complete_events])
+    def merge_from_heap(heap, merger_name):
+        _, chunk1 = heappop(heap)
+        _, chunk2 = heappop(heap)
+        merged_chunk = sorted(chunk1 + chunk2)
+        console.log(f"{merger_name} merged heap sequences of sizes: {len(chunk1):,} and {len(chunk2):,}.", style="bold green")
+        heappush(heap, (len(merged_chunk), merged_chunk))
 
-        if sorted_chunks_queue.qsize() >= 2:
-            while not sorted_chunks_queue.empty():
-                chunk = sorted_chunks_queue.get()
+    while finished_sorters < total_sorters or merger_queue.qsize() >= 2 or len(heap) >= 2:
+        queue_chunks = []
+
+        finished_sorters = sum([event.is_set() for event in sort_done_events])
+
+        # Handle the chunks in the merger queue
+        if merger_queue.qsize() >= 2:
+            while not merger_queue.empty():
+                chunk = merger_queue.get()
                 queue_chunks.extend(chunk)
 
+        # Merge the sequences from the queue
         if queue_chunks:
             queue_merged_chunk = sorted(queue_chunks)
             console.log(f"{merger_name} merged {len(queue_chunks):,} sequences from queue.", style="green")
             heappush(heap, (len(queue_merged_chunk), queue_merged_chunk))
-        elif len(heap) >= 2:
-            _, chunk1 = heappop(heap)
-            _, chunk2 = heappop(heap)
-            merged_chunk = sorted(chunk1 + chunk2)
-            console.log(f"{merger_name} merged heap sequences of sizes: {len(chunk1):,} and {len(chunk2):,}.", style="bold green")
-            heappush(heap, (len(merged_chunk), merged_chunk))
+
+        # If there are still enough chunks in the heap, merge again
+        if len(heap) >= 2:
+            merge_from_heap(heap, merger_name)
 
     if finished_sorters == total_sorters:
-        console.log(f"{merger_name} confirmed all sorters have completed.", style="yellow")
+        console.log(f"{merger_name} confirmed all sorters have doned.", style="yellow")
 
-    for event in read_complete_events: event.wait()
+    for event in read_done_events: event.wait()
     dispatch_done_event.wait()
-    for event in sort_complete_events: event.wait()
+    for event in sort_done_events: event.wait()
 
-    while not sorted_chunks_queue.empty():
-        chunk = sorted_chunks_queue.get()
+    while not merger_queue.empty():
+        chunk = merger_queue.get()
         heappush(heap, (len(chunk), chunk))
         console.log(f"{merger_name} moved {len(chunk):,} sequences from queue to heap.", style="bold yellow")
 
@@ -243,8 +275,6 @@ def write_output(queue, filename, merger_done_event, writer_sem):
                 console.log(f"{writer_name} already released semaphore, synchronizing with merger.", style="yellow")
 
 
-
-
 if __name__ == "__main__":
     # Configuration
     num_sorters = 12
@@ -257,37 +287,26 @@ if __name__ == "__main__":
 
     # Set up mp resources
     with mp.Manager() as manager:
-
-        chunk_complete_sems = [manager.Semaphore(0) for _ in filenames]
         
         dispatch_queues = [manager.Queue() for _ in filenames]
         sorter_queue = manager.Queue()
-
-        read_complete_events = [manager.Event() for _ in filenames]
+        read_done_events = [manager.Event() for _ in filenames]
         dispatch_done_event = manager.Event()
-
         sort_start_events = [manager.Event() for _ in range(num_sorters)]
         sorter_lock = manager.Lock()
-        sorted_chunks_queue = manager.Queue()
-        sort_complete_events = [manager.Event() for _ in range(num_sorters)]
-
+        merger_queue = manager.Queue()
+        sort_done_events = [manager.Event() for _ in range(num_sorters)]
         merger_lock = manager.Lock()
         merger_done_event = manager.Event()
-        
         output_queue_filenames = [(manager.Queue(), filename) for filename in filenames]
-
         writer_sems = [manager.Semaphore(0) for _ in range(len(output_queue_filenames))]
 
-
         # Create processes
-        reader_barrier = mp.Barrier(len(filenames))
-        readers = [mp.Process(target=read_file, args=(filename, chunk_complete_sem, queue, reader_barrier, event)) for filename, chunk_complete_sem, queue, event in zip(filenames, chunk_complete_sems, dispatch_queues, read_complete_events)]
-        dispatch_process = mp.Process(target=dispatch, args=(dispatch_queues, chunk_complete_sems, sorter_queue, read_complete_events, dispatch_done_event))
-        sorters = [mp.Process(target=sorter, args=(sorter_queue, chunk_complete_sems, sorted_chunks_queue, read_complete_events, sort_complete_event, sorter_lock)) for sort_complete_event in sort_complete_events]
-        merger_process = mp.Process(target=merger, args=(sorted_chunks_queue, output_queue_filenames, sort_complete_events, merger_done_event, writer_sems))
+        readers = [mp.Process(target=read_file, args=(filename, queue, event)) for filename, queue, event in zip(filenames, dispatch_queues, read_done_events)]
+        dispatch_process = mp.Process(target=dispatch, args=(dispatch_queues, sorter_queue, read_done_events, dispatch_done_event))
+        sorters = [mp.Process(target=sorter, args=(sorter_queue, merger_queue, read_done_events, sort_done_event, sorter_lock)) for sort_done_event in sort_done_events]
+        merger_process = mp.Process(target=merger, args=(merger_queue, output_queue_filenames, sort_done_events, merger_done_event, writer_sems))
         writers = [mp.Process(target=write_output, args=(queue, filename, merger_done_event, writer_sem)) for (queue, filename), writer_sem in zip(output_queue_filenames, writer_sems)]
-
-
 
         # Start processes
         for r in readers:
@@ -299,11 +318,12 @@ if __name__ == "__main__":
         for w in writers:
             w.start()
             
-        # # Wait for processes to complete
-        # for r in readers:
-        #     r.join()
-        # for s in sorters:
-        #     s.join()
-        # merger_process.join()
+        # Wait for processes to done
+        for r in readers:
+            r.join()
+        dispatch_process.join()
+        for s in sorters:
+            s.join()
+        merger_process.join()
         for w in writers:
             w.join()
