@@ -141,6 +141,8 @@ def sorter(sorter_queue, merger_queue, read_done_events, sort_done_event, sorter
         if dispatch_data:
             sorted_data =  sorted(list(zip(*[zstd_decompress(entry) for entry in dispatch_data])))
             chunk_size = len(sorted_data)
+
+            # peek at the first element of the first 5 sequence to get the size of the elements to make sure they are sorted
             element_sizes = [len(sequence) for sequence in sorted_data[0]]
             merger_queue.put(sorted_data)
             console.log(f"{sorter_name} sorted a chunk: {chunk_size:,} x {element_sizes}", style="green")
@@ -152,7 +154,8 @@ def sorter(sorter_queue, merger_queue, read_done_events, sort_done_event, sorter
 
     console.log(f"{sorter_name} finished.", style="red")
 
-def merger(merger_queue, output_queue_filenames, sort_done_events, merger_done_event, writer_sems):
+def merger(merger_queue, send_ends, sort_done_events, merger_done_event, output_filenames, writer_sems):
+
     heap = []
     total_sorters = len(sort_done_events)
     finished_sorters = 0
@@ -186,9 +189,6 @@ def merger(merger_queue, output_queue_filenames, sort_done_events, merger_done_e
         if len(heap) >= 2:
             merge_from_heap(heap, merger_name)
 
-    if finished_sorters == total_sorters:
-        console.log(f"{merger_name} confirmed all sorters have doned.", style="yellow")
-
     for event in read_done_events: event.wait()
     dispatch_done_event.wait()
     for event in sort_done_events: event.wait()
@@ -207,78 +207,66 @@ def merger(merger_queue, output_queue_filenames, sort_done_events, merger_done_e
 
     console.log(f"{merger_name} final merged chunk size: {len(heap[0][1]):,}.", style="bold green")
 
-    merger_done_event.set()
     console.log(f"{merger_name} contacting writers...", style="bold white")    
     # Dispatch to writers
+  
     while heap:
         _, chunk = heappop(heap)
         separated_lists = list(zip(*chunk))
-        for i, (q, filename) in enumerate(output_queue_filenames):
-            q.put(separated_lists[i])
+
+        for i, (send_end, filename) in enumerate(zip(send_ends, output_filenames)):
+            # writer_sems[i].release()
+            send_end.send(separated_lists[i])  # Send through the pipe
             console.log(f"{merger_name} dispatched {len(separated_lists[i]):,} sequences to writer-{i+1} for file {filename}.", style="green")
-            writer_sems[i].release()
+    
+    merger_done_event.set()
+
+    for send_end in send_ends:
+        send_end.close()
+
+    # for i, (send_end, filename) in enumerate(zip(send_ends, output_filenames)):
+    #         writer_sems[i].acquire()
 
     console.log(f"{merger_name} finished.", style="red")
 
-def write_output(queue, filename, merger_done_event, writer_sem):
-    merger_done_event.wait()
-
-    sequences = []
-    output_filename = filename.replace('.fastq.gz', '.reads.zst')
+def writer_process(recv_end, output_filename, writer_sem):
     writer_name = f"[bold cyan]Writer {mp.current_process().name}[/bold cyan]"
 
-    while True:
-        try:
-            writer_sem.acquire()
-            chunk = queue.get(timeout=1)
-            sequences.extend(chunk)
-            console.log(f"{writer_name} retrieved {len(chunk):,} sequences.", style="yellow")
+    with pyzstd.open(output_filename, 'wb') as f:
+        while True:
+            # If the merger is done and there's no data in the pipe, break out of the loop
+            if merger_done_event.is_set() and not recv_end.poll():
+                break
 
-            with pyzstd.open(output_filename, 'wb') as f:
+            # Wait for data to be available
+            if recv_end.poll():
+                # Acquire the semaphore if there's data
+                # writer_sem.acquire()
+
+                # Receive the data
+                sequences = recv_end.recv()
+
+                # Check for termination condition
+                if sequences is None:
+                    recv_end.close()
+                    break
+
+                # Write the data
                 for seq in sequences:
                     f.write((seq + '\n').encode())
-            console.log(f"{writer_name} finished writing {len(sequences):,} to ({output_filename}). Shutting down.", style="red")
-        except Empty:
-            if queue.empty():
-                break
-        finally:
-            try:
-                writer_sem.release()
-            except ValueError:
-                pass  # Semaphore was already released, no action needed
 
-def write_output(queue, filename, merger_done_event, writer_sem):
-    merger_done_event.wait()
+                console.log(f"{writer_name} wrote {len(sequences):,} sequences to {output_filename}.", style="green")
 
-    sequences = []
-    output_filename = filename.replace('.fastq.gz', '.reads.zst')
-    writer_name = f"[bold cyan]Writer {mp.current_process().name}[/bold cyan]"
+    console.log(f"{writer_name} finished.", style="red")
 
-    while True:
-        try:
-            writer_sem.acquire()
-            chunk = queue.get(timeout=1)
-            sequences.extend(chunk)
-            console.log(f"{writer_name} retrieved a chunk of {len(chunk):,} sequences.", style="yellow")
 
-            with pyzstd.open(output_filename, 'wb') as f:
-                for seq in sequences:
-                    f.write((seq + '\n').encode())
-            console.log(f"{writer_name} finished writing {len(sequences):,} sequences to ({output_filename}). Shutting down.", style="red")
-        except Empty:
-            if queue.empty():
-                break
-        finally:
-            try:
-                writer_sem.release()
-            except ValueError:
-                console.log(f"{writer_name} already released semaphore, synchronizing with merger.", style="yellow")
 
 
 if __name__ == "__main__":
     # Configuration
     num_sorters = 12
     filenames = sys.argv[1:]
+    output_filenames = [filename.replace('.fastq.gz', '.reads.zst') for filename in filenames]
 
     from rich.console import Console
     from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn
@@ -301,12 +289,16 @@ if __name__ == "__main__":
         output_queue_filenames = [(manager.Queue(), filename) for filename in filenames]
         writer_sems = [manager.Semaphore(0) for _ in range(len(output_queue_filenames))]
 
+        pipes = [mp.Pipe() for _ in filenames]
+        merger_send_ends = [send for send, _ in pipes]
+        writer_recv_ends = [recv for _, recv in pipes]
+
         # Create processes
         readers = [mp.Process(target=read_file, args=(filename, queue, event)) for filename, queue, event in zip(filenames, dispatch_queues, read_done_events)]
         dispatch_process = mp.Process(target=dispatch, args=(dispatch_queues, sorter_queue, read_done_events, dispatch_done_event))
         sorters = [mp.Process(target=sorter, args=(sorter_queue, merger_queue, read_done_events, sort_done_event, sorter_lock)) for sort_done_event in sort_done_events]
-        merger_process = mp.Process(target=merger, args=(merger_queue, output_queue_filenames, sort_done_events, merger_done_event, writer_sems))
-        writers = [mp.Process(target=write_output, args=(queue, filename, merger_done_event, writer_sem)) for (queue, filename), writer_sem in zip(output_queue_filenames, writer_sems)]
+        merger_process = mp.Process(target=merger, args=(merger_queue, merger_send_ends, sort_done_events, merger_done_event, output_filenames, writer_sems))
+        writers = [mp.Process(target=writer_process, args=(recv_end, output_filename, writer_sem)) for recv_end, output_filename, writer_sem in zip(writer_recv_ends, output_filenames, writer_sems)]
 
         # Start processes
         for r in readers:
