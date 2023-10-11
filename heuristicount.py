@@ -37,6 +37,12 @@ def open_file(file_path, mode):
         raise ValueError("Unsupported file type.")
 
 def read_in_chunks(file1, file2=None, chunk_size=4096):
+    """
+    Reads in chunks of data from one or two files, depending on whether a second file is provided.
+    The files must be in either '.fastq' or '.reads' format.
+    The function yields a tuple of two lists, each containing up to 'chunk_size' reads from the input files.
+    If only one file is provided, the second list in the tuple will be None.
+    """
 
     reads1, reads2 = [], []
     
@@ -154,7 +160,7 @@ def determine_forward_read_with_generator(file1, file2, barcodes, is_paired_end)
                     valid_samples1.append(seq1)
                     valid_samples2 = None # Placeholder until we can determine the orientation of sample1
 
-            if len(valid_samples1) >= 2**16 and len(valid_samples1) >= reads_sampled * 0.5:
+            if len(valid_samples1) >= 2**15 and len(valid_samples1) >= reads_sampled * 0.25:
                 break
 
     total_count1 = sum(1 for seq in valid_samples1 if contains_barcode(seq, barcodes, barcode_length)) if valid_samples1 else 0
@@ -171,8 +177,22 @@ def determine_forward_read_with_generator(file1, file2, barcodes, is_paired_end)
     return reads_sampled, needs_swap, valid_samples1, valid_samples2
 
 
-def find_ends(reads, start, length, reverse_strand=False):
+from typing import List, Tuple
+from collections import Counter
 
+def find_ends(reads: List[str], start: int, length: int, reverse_strand: bool = False) -> Tuple[str, str]:
+    """
+    Finds the most common flanking sequence for a given start position and length in a list of reads.
+
+    Args:
+        reads (List[str]): A list of reads.
+        start (int): The start position for the flanking sequence.
+        length (int): The length of the flanking sequence.
+        reverse_strand (bool, optional): Whether to search on the reverse strand. Defaults to False.
+
+    Returns:
+        Tuple[str, str]: A tuple containing the most common left and right flanking sequences.
+    """
     # Initialize max values; reverse if needed
     max_left, max_right = (4, 4) if not reverse_strand else (4, 4)[::-1]
 
@@ -214,6 +234,8 @@ def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_lengt
 
     if reads1 and reads2:  # Paired-end processing
         for rec1, rec2 in zip(reads1, reads2):
+            if 'N' in rec1 or 'N' in rec2:
+                continue
             candidate1 = rec1[barcode_start1:barcode_start1 + barcode_length]
             candidate2 = rec2[barcode_start2:barcode_start2 + barcode_length]
             candidate2_rc = candidate2[::-1].translate(str.maketrans("ATCGN", "TAGCN"))
@@ -226,6 +248,8 @@ def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_lengt
 
     elif reads1:  # Single-end processing, forward orientation
         for rec1 in reads1:
+            if 'N' in rec1:
+                continue
             candidate1 = rec1[barcode_start1:barcode_start1 + barcode_length]
             if candidate1 in barcodes:
                 counts[candidate1[left1_len:-right1_len or None]] += 1
@@ -235,6 +259,8 @@ def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_lengt
 
     elif reads2:  # Single-end processing, reverse complement
         for rec2 in reads2:
+            if 'N' in rec2:
+                continue
             candidate2 = rec2[barcode_start2:barcode_start2 + barcode_length]
             candidate2_rc = candidate2[::-1].translate(str.maketrans("ATCGN", "TAGCN"))
             if candidate2 in barcodes:
