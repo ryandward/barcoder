@@ -7,6 +7,7 @@ import sys  # Needed for the exit function
 import time
 from heapq import heappop, heappush
 from queue import Empty
+import os
 
 import psutil
 import pyzstd
@@ -38,14 +39,17 @@ def check_memory_usage(percentage=True):
 def check_cpu_usage():
     return psutil.cpu_percent(interval=1)
 
-
 def read_file(filename, dispatch_queues, read_done_event):
     sequences = []
     count = 0
     chunk_number = 0
     reader_name = f"[bold purple]Reader {mp.current_process().name}[/bold purple]"
     console.log(f"{reader_name} beginning to read: {filename}", style="yellow")
-    with gzip.open(filename, 'rt') as f:
+    
+    # Check file extension to determine how to open
+    open_func = gzip.open if filename.endswith('.gz') else open
+
+    with open_func(filename, 'rt') as f:
         for line in f:
             count += 1
             if count % 4 == 2:
@@ -70,6 +74,7 @@ def read_file(filename, dispatch_queues, read_done_event):
         console.log(f"{reader_name} finished.", style="green")
     else:
         console.log(f"{reader_name} failed to finish.", style="bold red")
+
 
 
 def dispatch(dispatch_queues, sorter_queue, read_done_events, dispatch_done_event):    
@@ -266,7 +271,16 @@ if __name__ == "__main__":
     # Configuration
     num_sorters = 12
     filenames = sys.argv[1:]
-    output_filenames = [filename.replace('.fastq.gz', '.reads.zst') for filename in filenames]
+
+    def get_output_filename(filename):
+        if filename.endswith('.fastq.gz'):
+            return filename.replace('.fastq.gz', '.reads.zst')
+        elif filename.endswith('.fastq'):
+            return filename.replace('.fastq', '.reads.zst')
+        return filename + '.reads.zst'  # default case
+
+    output_filenames = [get_output_filename(filename) for filename in filenames]
+
 
     from rich.console import Console
     from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn
