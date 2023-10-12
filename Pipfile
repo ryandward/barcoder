@@ -11,6 +11,7 @@ biopython = "*"
 tabulate = "*"
 zstandard = "*"
 pyzstd = "*"
+psutil = "*"
 
 [dev-packages]
 
