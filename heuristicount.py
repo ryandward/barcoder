@@ -14,6 +14,11 @@ from Bio.Seq import Seq
 from rich.console import Console
 from rich.table import Table
 
+import math
+
+def safe_len(s):
+    return 0 if s is None else len(s)
+
 
 def read_fasta(fasta_file):
     barcodes = set()
@@ -127,17 +132,24 @@ def count_barcodes_in_sequence(seq, barcodes, barcode_length):
 
     return count
 
+
 def determine_forward_read_with_generator(file1, file2, barcodes, is_paired_end):
     barcode_length = len(next(iter(barcodes)))
-    valid_samples1 = []
-    valid_samples2 = []
-    reads_sampled = 0
+    valid_samples1 = set()
+    valid_samples2 = set()
+    total_reads_sampled = 0
+    new_reads_sampled = 0
 
-    chunk_generator = read_in_chunks(file1, file2 if is_paired_end else None, chunk_size=2**16)
+    chunk_generator = read_in_chunks(file1, file2 if is_paired_end else None, chunk_size=len(barcodes))
 
     for s1, s2 in chunk_generator:            
         for seq1, seq2 in zip(s1, s2 if s2 else [None]*len(s1)):
-            reads_sampled += 1
+            total_reads_sampled += 1
+            
+            if (seq1 in valid_samples1 and (seq2 is None or seq2 in valid_samples2)) or \
+            (seq2 in valid_samples1 and seq1 in valid_samples2):
+                continue
+            new_reads_sampled += 1
 
             valid_seq1_fwd = contains_barcode(seq1, barcodes, barcode_length) if seq1 else None
             valid_seq2_fwd = contains_barcode(seq2, barcodes, barcode_length) if seq2 else None
@@ -147,23 +159,25 @@ def determine_forward_read_with_generator(file1, file2, barcodes, is_paired_end)
             
             if is_paired_end:
                 if valid_seq1_fwd and valid_seq2_rev:
-                    valid_samples1.append(seq1)
-                    valid_samples2.append(seq2)
-                elif valid_seq1_rev and valid_seq2_fwd:
-                    valid_samples1.append(seq1)
-                    valid_samples2.append(seq2)
+                    valid_samples1.add(seq1)
+                    valid_samples2.add(seq2)
+                if valid_seq1_rev and valid_seq2_fwd:
+                    valid_samples1.add(seq1)
+                    valid_samples2.add(seq2)
             else:
                 if valid_seq1_fwd:
-                    valid_samples1.append(seq1)
+                    valid_samples1.add(seq1)
                     valid_samples2 = None # Placeholder until we can determine the orientation of sample1
-                elif valid_seq1_rev:
-                    valid_samples1.append(seq1)
+                if valid_seq1_rev:
+                    valid_samples1.add(seq1)
                     valid_samples2 = None # Placeholder until we can determine the orientation of sample1
+            # print(f"Valid reads(F,R), total reads, new reads: {(safe_len(valid_samples1), safe_len(valid_samples2)), total_reads_sampled, new_reads_sampled}", file=sys.stderr, end='\r')    
+            # if len(valid_samples1) > new_reads_sampled * 0.25 and len(valid_samples1) > len(barcodes) * 0.25:
+            if len(valid_samples1) > len(barcodes) * 0.25:
 
-            if len(valid_samples1) >= 2**15 and len(valid_samples1) >= reads_sampled * 0.25:
                 break
 
-    total_count1 = sum(1 for seq in valid_samples1 if contains_barcode(seq, barcodes, barcode_length)) if valid_samples1 else 0
+    total_count1 = sum(1 for seq in valid_samples1 if seq and contains_barcode(seq, barcodes, barcode_length)) if valid_samples1 else 0
     total_count2 = sum(1 for seq in valid_samples2 if seq and contains_barcode(seq, barcodes, barcode_length)) if valid_samples2 else 0
 
     needs_swap = False
@@ -174,7 +188,7 @@ def determine_forward_read_with_generator(file1, file2, barcodes, is_paired_end)
         rc_count = sum(1 for seq in valid_samples1 if contains_barcode(seq[::-1].translate(str.maketrans("ATCGN", "TAGCN")), barcodes, barcode_length))
         needs_swap = rc_count > total_count1
 
-    return reads_sampled, needs_swap, valid_samples1, valid_samples2
+    return new_reads_sampled, needs_swap, valid_samples1, valid_samples2
 
 
 from typing import List, Tuple
@@ -194,7 +208,7 @@ def find_ends(reads: List[str], start: int, length: int, reverse_strand: bool = 
         Tuple[str, str]: A tuple containing the most common left and right flanking sequences.
     """
     # Initialize max values; reverse if needed
-    max_left, max_right = (4, 4) if not reverse_strand else (4, 4)[::-1]
+    max_left, max_right = (10, 10) if not reverse_strand else (10, 10)[::-1]
 
     # Initialize Counters for left and right flanking regions
     lefts, rights = Counter(), Counter()
@@ -216,63 +230,70 @@ def find_ends(reads: List[str], start: int, length: int, reverse_strand: bool = 
     # Find the most common flanking sequence
     left_most_common = lefts.most_common(1)[0][0] if lefts else None
     right_most_common = rights.most_common(1)[0][0] if rights else None
-
     return left_most_common, right_most_common
-
+    
 def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_length, left1, right1, left2, right2, need_swap):
-
     reads1, reads2 = chunk
-
+    
     if need_swap:
         reads1, reads2 = reads2, reads1
 
     counts = defaultdict(int)
-    left1_len = len(left1) if left1 else 0
-    right1_len = len(right1) if right1 else 0
-    left2_len = len(left2) if left2 else 0
-    right2_len = len(right2) if right2 else 0
+
+    def validate_candidate(candidate, left, right, reversed=False):
+        in_barcodes = candidate in barcodes
+        
+        if reversed:
+            seen_candidate = candidate[safe_len(right):safe_len(candidate) - safe_len(left)][::-1].translate(str.maketrans("ATCGN", "TAGCN"))
+        else:
+            seen_candidate = candidate[safe_len(left):safe_len(candidate) - safe_len(right)]
+        
+        has_junction = candidate.startswith(left or '') and candidate.endswith(right or '')
+        
+        return in_barcodes, has_junction, seen_candidate
 
     if reads1 and reads2:  # Paired-end processing
         for rec1, rec2 in zip(reads1, reads2):
             if 'N' in rec1 or 'N' in rec2:
                 continue
-            candidate1 = rec1[barcode_start1:barcode_start1 + barcode_length]
-            candidate2 = rec2[barcode_start2:barcode_start2 + barcode_length]
-            candidate2_rc = candidate2[::-1].translate(str.maketrans("ATCGN", "TAGCN"))
-            if candidate2_rc == candidate1:
-                if candidate1 in barcodes:
-                    counts[candidate1[left1_len:-right1_len or None]] += 1
-                elif candidate1.startswith(left1 or '') and candidate1.endswith(right1 or ''):
-                    barcode = candidate1[left1_len:-right1_len or None] + "*"  
-                    counts[barcode] += 1
+            candidate1 = rec1[barcode_start1:barcode_start1 + safe_len(left1) + barcode_length + safe_len(right1)]
+            in_barcodes1, has_junction1, seen_candidate1 = validate_candidate(candidate1, left1, right1)
+            
+            if in_barcodes1 and has_junction1:
+                counts[seen_candidate1] += 1
+            elif has_junction1:
+                counts[seen_candidate1 + "*"] += 1
 
     elif reads1:  # Single-end processing, forward orientation
         for rec1 in reads1:
             if 'N' in rec1:
                 continue
-            candidate1 = rec1[barcode_start1:barcode_start1 + barcode_length]
-            if candidate1 in barcodes:
-                counts[candidate1[left1_len:-right1_len or None]] += 1
-            elif candidate1.startswith(left1 or '') and candidate1.endswith(right1 or ''):
-                barcode = candidate1[left1_len:-right1_len or None] + "*"  
-                counts[barcode] += 1
+            candidate1 = rec1[barcode_start1:barcode_start1 + safe_len(left1) + barcode_length + safe_len(right1)]
+            in_barcodes1, has_junction1, seen_candidate1 = validate_candidate(candidate1, left1, right1)
+            
+            if in_barcodes1 and has_junction1:
+                counts[seen_candidate1] += 1
+            elif has_junction1:
+                counts[seen_candidate1 + "*"] += 1
 
     elif reads2:  # Single-end processing, reverse complement
         for rec2 in reads2:
             if 'N' in rec2:
                 continue
-            candidate2 = rec2[barcode_start2:barcode_start2 + barcode_length]
-            candidate2_rc = candidate2[::-1].translate(str.maketrans("ATCGN", "TAGCN"))
-            if candidate2 in barcodes:
-                counts[candidate2_rc[right2_len:-left2_len or None]] += 1
-            elif candidate2.startswith(left2 or '') and candidate2.endswith(right2 or ''):
-                barcode = candidate2_rc[right2_len:-left2_len or None] + "*"  
-                counts[barcode] += 1
+            candidate2 = rec2[barcode_start2:barcode_start2 + safe_len(left2) + barcode_length + safe_len(right2)]
+            in_barcodes2, has_junction2, seen_candidate2 = validate_candidate(candidate2, left2, right2, reversed=True)
+            
+            if in_barcodes2 and has_junction2:
+                counts[seen_candidate2] += 1
+            elif has_junction2:
+                counts[seen_candidate2 + "*"] += 1
     
     if reads1 and reads2 and len(reads1) != len(reads2):
         raise ValueError("Length of reads1 and reads2 should be the same for paired-end data.")
 
     return (counts, len(reads1) if reads1 else len(reads2))
+
+
 
 def find_start_positions(reads, barcodes, barcode_length, reverse_strand=False):
 
@@ -315,9 +336,9 @@ def main(args):
 
     # Your existing logging and swapping logic
     console.log("Determining orientation of reads...")
-    reads_sampled, need_swap, sample1, sample2 = determine_forward_read_with_generator(args.fastq1, args.fastq2, barcodes, is_paired_end)
+    new_reads_sampled, need_swap, sample1, sample2 = determine_forward_read_with_generator(args.fastq1, args.fastq2, barcodes, is_paired_end)
     
-    console.log(f"Sampled {reads_sampled} reads and found {len(sample1)} valid matches...")
+    console.log(f"Sampled {new_reads_sampled:,} unique reads and found {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse valid matches...")
     console.log(f"Swapping reads..." if need_swap else f"Proceeding with reads as is...")                
 
     # Apply the swap logic
@@ -383,12 +404,30 @@ def main(args):
             sys.exit(1)
 
     # Update barcodes
-    console.log("Associating barcodes with read junctions...")
-    if left1 and right1:
+
+    # Scenario 1: Only read1 is present
+    if left1 and not right1:
+        barcodes = {left1 + barcode for barcode in barcodes}
+    elif not left1 and right1:
+        barcodes = {barcode + right1 for barcode in barcodes}
+    elif left1 and right1:
         barcodes = {left1 + barcode + right1 for barcode in barcodes}
+
+    # Scenario 2: Both read1 and read2 are present
+    # TODO: This scenario currently assumes the same operations on read1 as Scenario 1.
+    # Revisit this if future use cases require modifications to this logic.
+
+    # Scenario 3: Only read2 is present and it's reverse complement to the barcode design
+    elif left2 and not right2:
+        barcodes = {left2 + barcode[::-1].translate(str.maketrans("ATCGN", "TAGCN")) for barcode in barcodes}
+    elif not left2 and right2:
+        barcodes = {barcode[::-1].translate(str.maketrans("ATCGN", "TAGCN")) + right2 for barcode in barcodes}
     elif left2 and right2:
         barcodes = {left2 + barcode[::-1].translate(str.maketrans("ATCGN", "TAGCN")) + right2 for barcode in barcodes}
-    barcode_length = len(next(iter(barcodes)))
+
+
+    # console.log(f"Left and right: [bold green]{left1}[/bold green]...[bold red]{right1}[/bold red]" if left1 or right1 else f"Left and right: {left2}...{right2}")
+    # console.log(f"Saple of barcodes: {next(iter(barcodes))}")
 
     console.log("Executing high-throughput read analysis...")
     chunk_generator = read_in_chunks(args.fastq1, args.fastq2 if is_paired_end else None)
@@ -458,16 +497,16 @@ def main(args):
     combined_table.add_row("[bold bright_blue]Heuristics[/bold bright_blue]", "")
 
     if barcode_length:
-        len_left = len(left1) if left1 else len(right2) if right2 else 0
-        len_right = len(right1) if right1 else len(left2) if left2 else None
-        combined_table.add_row("Barcode Length", f"[bold]{barcode_length - len_left - (len_right if len_right is not None else 0)}[/bold]")
+        # len_left = len(left1) if left1 else len(right2) if right2 else 0
+        # len_right = len(right1) if right1 else len(left2) if left2 else None
+        combined_table.add_row("Barcode Length", f"[bold]{barcode_length}[/bold]")
     if barcode_start1:
-        combined_table.add_row("Forward Offset", f"[bold]{barcode_start1 + len(left1)}[/bold]")
+        combined_table.add_row("Forward Offset", f"[bold]{barcode_start1}[/bold]")
     if barcode_start2:
-        combined_table.add_row("Reverse Offset", f"[bold]{barcode_start2 + len(right2)}[/bold]")
-    if left1 and right1:
+        combined_table.add_row("Reverse Offset", f"[bold]{barcode_start2}[/bold]")
+    if left1 or right1:
         combined_table.add_row("Forward Junction", f"[bold]{left1}...{right1}[/bold]")
-    if left2 and right2:
+    if left2 or right2:
         combined_table.add_row("Reverse Junction", f"[bold]{left2}...{right2}[/bold]")
 
     # Numeric Statistics Sub-heading
@@ -475,14 +514,14 @@ def main(args):
     combined_table.add_row("[bold bright_green]Barcode Alignment Stats[/bold bright_green]", "")
 
     # Rows for Numeric Statistics
-    combined_table.add_row("Barcodes Declared", f"[bold]{len(barcodes)}[/bold]")
-    combined_table.add_row("Documented Barcodes Found", f"[bold]{len(documented_barcodes)}[/bold]")
-    combined_table.add_row("Undocumented Barcodes Found", f"[bold]{len(undocumented_barcodes)}[/bold]")
-    combined_table.add_row("Total Reads", f"[bold]{total_reads}[/bold]")
-    combined_table.add_row("Documented Barcode Reads", f"[bold]{sum(documented_barcodes.values())}[/bold]")
-    combined_table.add_row("Undocumented Barcode Reads", f"[bold]{sum(undocumented_barcodes.values())}[/bold]")
-    combined_table.add_row("Documented Fraction", f"[bold]{(sum(documented_barcodes.values()) / total_reads if total_reads != 0 else 0):.4f}[/bold]")
-    combined_table.add_row("Undocumented Fraction", f"[bold]{(sum(undocumented_barcodes.values()) / total_reads if total_reads != 0 else 0):.4f}[/bold]", end_section=True)
+    combined_table.add_row("Barcodes Declared", f"[bold]{len(barcodes):,}[/bold]")
+    combined_table.add_row("Documented Barcodes Found", f"[bold]{len(documented_barcodes):,}[/bold]")
+    combined_table.add_row("Undocumented Barcodes Found", f"[bold]{len(undocumented_barcodes):,}[/bold]")
+    combined_table.add_row("Total Reads", f"[bold]{total_reads:,}[/bold]")
+    combined_table.add_row("Documented Barcode Reads", f"[bold]{sum(documented_barcodes.values()):,}[/bold]")
+    combined_table.add_row("Undocumented Barcode Reads", f"[bold]{sum(undocumented_barcodes.values()):,}[/bold]")
+    combined_table.add_row("Documented Fraction", f"[bold]{(sum(documented_barcodes.values()) / total_reads if total_reads != 0 else 0):.3f}[/bold]")
+    combined_table.add_row("Undocumented Fraction", f"[bold]{(sum(undocumented_barcodes.values()) / total_reads if total_reads != 0 else 0):.3f}[/bold]", end_section=True)
 
     # Sequence Information Sub-heading  
     combined_table.add_section()
@@ -493,7 +532,7 @@ def main(args):
     combined_table.add_row(f"[bold bright_yellow]Top {top_documented_barcodes} Documented Barcodes[/bold bright_yellow]", "")
     for idx, (barcode, count) in enumerate(documented_barcodes.most_common(top_documented_barcodes)):
         end_section = idx == (top_documented_barcodes - 1)
-        combined_table.add_row(barcode, str(count), end_section=end_section)
+        combined_table.add_row(barcode, f"{count:,}", end_section=end_section)
 
     # Add undocumented_barcodes to the main table
     combined_table.add_section()
@@ -501,7 +540,7 @@ def main(args):
     combined_table.add_row(f"[bold bright_red]Top {top_undocumented_barcodes} Undocumented Barcodes[/bold bright_red]", "")
     for idx, (barcode, count) in enumerate(undocumented_barcodes.most_common(top_undocumented_barcodes)):
         end_section = idx == (top_undocumented_barcodes - 1)
-        combined_table.add_row(barcode, str(count), end_section=end_section)
+        combined_table.add_row(barcode, f"{count:,}", end_section=end_section)
 
     # Print the combined table
     console.log(combined_table)
