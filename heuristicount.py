@@ -116,6 +116,7 @@ def contains_barcode(seq, barcodes, barcode_length):
             return True
     return False
 
+
 def count_barcodes_in_sequence(seq, barcodes, barcode_length):
     """
     Counts occurrences of barcodes both in forward and reverse complement of the sequence.
@@ -133,7 +134,7 @@ def count_barcodes_in_sequence(seq, barcodes, barcode_length):
     return count
 
 
-def determine_forward_read_with_generator(file1, file2, barcodes, is_paired_end):
+def sample_data(file1, file2, barcodes, is_paired_end):
     barcode_length = len(next(iter(barcodes)))
     valid_samples1 = set()
     valid_samples2 = set()
@@ -232,16 +233,22 @@ def find_ends(reads: List[str], start: int, length: int, reverse_strand: bool = 
     right_most_common = rights.most_common(1)[0][0] if rights else None
     return left_most_common, right_most_common
     
-def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_length, left1, right1, left2, right2, need_swap):
+def process_chunk(chunk, barcodes, junction_start1, junction_start2, barcode_length, left1, right1, left2, right2, need_swap):
     reads1, reads2 = chunk
+
+    # print(f"All arguments passed to process_chunk: {junction_start1, junction_start2, barcode_length, left1, right1, left2, right2, need_swap}", file=sys.stderr)
     
     if need_swap:
         reads1, reads2 = reads2, reads1
 
+
     counts = defaultdict(int)
 
-    def validate_candidate(candidate, left, right, reversed=False):
-        in_barcodes = candidate in barcodes
+    def validate_candidate(candidate, left, right, reversed=False, check_set=True):
+        if not check_set:
+           in_barcodes = False
+        else:
+           in_barcodes = candidate in barcodes
         
         if reversed:
             seen_candidate = candidate[safe_len(right):safe_len(candidate) - safe_len(left)][::-1].translate(str.maketrans("ATCGN", "TAGCN"))
@@ -252,37 +259,53 @@ def process_chunk(chunk, barcodes, barcode_start1, barcode_start2, barcode_lengt
         
         return in_barcodes, has_junction, seen_candidate
 
+    left1_len = safe_len(left1)
+    right1_len = safe_len(right1)
+    left2_len = safe_len(left2)
+    right2_len = safe_len(right2)
+
     if reads1 and reads2:  # Paired-end processing
         for rec1, rec2 in zip(reads1, reads2):
-            if 'N' in rec1 or 'N' in rec2:
+            if 'N' in rec1:
                 continue
-            candidate1 = rec1[barcode_start1:barcode_start1 + safe_len(left1) + barcode_length + safe_len(right1)]
+            candidate1 = rec1[junction_start1:junction_start1 + left1_len + barcode_length + right1_len]
             in_barcodes1, has_junction1, seen_candidate1 = validate_candidate(candidate1, left1, right1)
-            
-            if in_barcodes1 and has_junction1:
+
+            candidate2 = rec2[junction_start2:junction_start2 + left2_len + barcode_length + right2_len]
+
+            # instead of checking if seen_candidate2 is a barcode (it isn't, because its reverse-complemented), compare to the forward read
+            in_barcodes2, has_junction2, seen_candidate2 = validate_candidate(candidate2, left2, right2, reversed=True, check_set=False)
+
+            if seen_candidate1 != seen_candidate2: 
+                continue
+            if in_barcodes1 and has_junction1 and has_junction2:
                 counts[seen_candidate1] += 1
-            elif has_junction1:
+            elif has_junction1 and has_junction2:
                 counts[seen_candidate1 + "*"] += 1
+
 
     elif reads1:  # Single-end processing, forward orientation
         for rec1 in reads1:
             if 'N' in rec1:
                 continue
-            candidate1 = rec1[barcode_start1:barcode_start1 + safe_len(left1) + barcode_length + safe_len(right1)]
-            in_barcodes1, has_junction1, seen_candidate1 = validate_candidate(candidate1, left1, right1)
+            candidate1 = rec1[junction_start1:junction_start1 + left1_len + barcode_length + right1_len]
+            in_barcodes1, has_junction1, seen_candidate1 = validate_candidate(candidate1, left1, right1, reversed=False, check_set=True)
             
+            # easiest mode: barcodes are in the forward orientation and have no paired-end reads
             if in_barcodes1 and has_junction1:
                 counts[seen_candidate1] += 1
             elif has_junction1:
                 counts[seen_candidate1 + "*"] += 1
+            
 
     elif reads2:  # Single-end processing, reverse complement
         for rec2 in reads2:
             if 'N' in rec2:
                 continue
-            candidate2 = rec2[barcode_start2:barcode_start2 + safe_len(left2) + barcode_length + safe_len(right2)]
-            in_barcodes2, has_junction2, seen_candidate2 = validate_candidate(candidate2, left2, right2, reversed=True)
+            candidate2 = rec2[junction_start2:junction_start2 + left2_len + barcode_length + right2_len]
+            in_barcodes2, has_junction2, seen_candidate2 = validate_candidate(candidate2, left2, right2, reversed=True, check_set=True)
             
+            # reads will be reverse complemented and checked with 
             if in_barcodes2 and has_junction2:
                 counts[seen_candidate2] += 1
             elif has_junction2:
@@ -322,10 +345,8 @@ def main(args):
     barcodes = read_fasta(args.fasta_file)
     barcode_length = len(next(iter(barcodes)))
 
-    is_paired_end = bool(args.fastq2)
-    
     # Reading FASTQ Files
-# Using the function:
+    # Using the function:
     is_paired_end = bool(args.fastq2)
         
     # Reading FASTQ Files
@@ -334,11 +355,9 @@ def main(args):
     # Initialize
     need_swap = False 
 
-    # Your existing logging and swapping logic
     console.log("Determining orientation of reads...")
-    new_reads_sampled, need_swap, sample1, sample2 = determine_forward_read_with_generator(args.fastq1, args.fastq2, barcodes, is_paired_end)
-    
-    console.log(f"Sampled {new_reads_sampled:,} unique reads and found {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse valid matches...")
+    new_reads_sampled, need_swap, sample1, sample2 = sample_data(args.fastq1, args.fastq2, barcodes, is_paired_end)
+    console.log(f"Sampled {new_reads_sampled:,} unique reads and found {safe_len(sample1):,} File1 and {safe_len(sample2):,} File2 valid matches...")
     console.log(f"Swapping reads..." if need_swap else f"Proceeding with reads as is...")                
 
     # Apply the swap logic
@@ -365,22 +384,26 @@ def main(args):
             console.log("[bold red]No barcodes found in sample 2. Exiting.[/bold red]")
             sys.exit(1)
     else:
+        # Set barcode_start2 to an empty list to be consistent with barcode_start1
         barcode_start2 = None
 
     # Find flanking sequences
     if sample1 is not None:
         console.log("Identifying forward read junctions...")
         left1, right1 = find_ends(sample1, barcode_start1, barcode_length)
-        barcode_start1 -= len(left1) if left1 else 0
+        junction_start1 = barcode_start1 - len(left1) if left1 else 0
     else:
         left1, right1 = None, None
+        junction_start1 = None
 
     if sample2 is not None:
         console.log("Identifying reverse read junctions...")
         left2, right2 = find_ends(sample2, barcode_start2, barcode_length, reverse_strand=True)
-        barcode_start2 -= len(left2) if left2 else 0
+        junction_start2 =  barcode_start2 - len(left2) if left2 else 0
     else:
         left2, right2 = None, None
+        junction_start2 = None
+
 
    # Calculate reverse complements
     left2_rc = left2[::-1].translate(str.maketrans("ATCGN", "TAGCN")) if left2 else None
@@ -391,19 +414,17 @@ def main(args):
 
     if left1 and right2_rc:
         min_len_left = min(len(left1), len(right2_rc))
-        # console.log(f"Comparing {left1[-min_len_left:]} and {right2_rc[:min_len_left]}")
         if left1[-min_len_left:] != right2_rc[:min_len_left]:
             console.log("[bold red]Error: Forward and reverse left flanking sequences are not reverse complements.[/bold red]")
             sys.exit(1)
         
     if right1 and left2_rc:
         min_len_right = min(len(right1), len(left2_rc))
-        # console.log(f"Comparing {right1[:min_len_right]} and {left2_rc[:min_len_right]}")
         if right1[:min_len_right] != left2_rc[:min_len_right]:
             console.log("[bold red]Error: Forward and reverse right flanking sequences are not reverse complements.[/bold red]")
             sys.exit(1)
 
-    # Update barcodes
+    # Add junctions to the ends of the barcodes, if present
 
     # Scenario 1: Only read1 is present
     if left1 and not right1:
@@ -433,7 +454,7 @@ def main(args):
     chunk_generator = read_in_chunks(args.fastq1, args.fastq2 if is_paired_end else None)
 
     # Create argument generator
-    args_generator = ((chunk, barcodes, barcode_start1, barcode_start2, barcode_length, left1, right1, left2, right2, need_swap) for chunk in chunk_generator)
+    args_generator = ((chunk, barcodes, junction_start1, junction_start2, barcode_length, left1, right1, left2, right2, need_swap) for chunk in chunk_generator)
 
     # Execute multiprocessing
     with Pool(num_threads) as pool:
@@ -516,6 +537,7 @@ def main(args):
     # Rows for Numeric Statistics
     combined_table.add_row("Barcodes Declared", f"[bold]{len(barcodes):,}[/bold]")
     combined_table.add_row("Documented Barcodes Found", f"[bold]{len(documented_barcodes):,}[/bold]")
+    combined_table.add_row("Unseen Barcodes", f"[bold]{(len(barcodes) - len(documented_barcodes)):,}[/bold]")
     combined_table.add_row("Undocumented Barcodes Found", f"[bold]{len(undocumented_barcodes):,}[/bold]")
     combined_table.add_row("Total Reads", f"[bold]{total_reads:,}[/bold]")
     combined_table.add_row("Documented Barcode Reads", f"[bold]{sum(documented_barcodes.values()):,}[/bold]")
