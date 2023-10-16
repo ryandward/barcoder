@@ -1,14 +1,15 @@
 import gzip
 import heapq
 import multiprocessing as mp
+import os
 import queue
 import random
-import sys  # Needed for the exit function
+import sys
 import time
+from collections import defaultdict
 from heapq import heappop, heappush
-from queue import Empty
-import os
 from multiprocessing import cpu_count
+from queue import Empty
 
 import psutil
 import pyzstd
@@ -17,9 +18,6 @@ from rich.console import group
 from rich.panel import Panel
 from rich.progress import Progress, track
 
-#import defaultdict
-from collections import defaultdict
-import psutil
 
 def zstd_compress(sequences):
     data = '\n'.join(sequences)

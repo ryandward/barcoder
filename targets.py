@@ -7,10 +7,10 @@ import platform
 import re
 import subprocess
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
 from multiprocessing import cpu_count
-import sys
+
 import pandas as pd
 import pysam
 import rich
@@ -20,14 +20,11 @@ from Bio.SeqFeature import CompoundLocation
 from Bio.SeqRecord import SeqRecord
 from rich.console import Console
 from rich.table import Table
-from collections import defaultdict
 
 
-# Utility function to open files
 def open_file(file, mode):
     return gzip.open(file, mode) if file.endswith(".gz") else open(file, mode)
 
-# Create a working directory
 def create_working_directory(dir_name="working_directory"):
   
     os.makedirs(dir_name, exist_ok=True)
@@ -40,20 +37,17 @@ def create_topological_fasta(genbank_file_name, topological_fasta_file_name, ove
     with open_func(genbank_file_name, "rt") as input_handle:
         for record in SeqIO.parse(input_handle, "genbank"):
             if record.annotations.get('topology', None) == 'circular':
-                # Create new sequence with overhang
                 overhang_length = 100_000
-                new_seq = record.seq + record.seq[:overhang_length]
-                topological_record = SeqRecord(Seq(str(new_seq)), id=record.id, description=record.description)
-                topological_records.append(topological_record)
 
-    # Write the modified records to a new FASTA file
+            new_seq = record.seq + record.seq[:overhang_length]
+            topological_record = SeqRecord(Seq(str(new_seq)), id=record.id, description=record.description)
+            topological_records.append(topological_record)
+
     with open(topological_fasta_file_name, "w") as output_handle:
         SeqIO.write(topological_records, output_handle, "fasta")
 
 
-# Convert fasta to fake fastq
 def create_fake_topological_fastq(topological_fasta_file_name, fastq_file):
-    # if it is gzipped, open with gzip.open otherwise open with open
     if topological_fasta_file_name.endswith(".gz"):
         with gzip.open(topological_fasta_file_name, "rt") as input_handle, open(fastq_file, "w") as output_handle:
             for record in SeqIO.parse(input_handle, "fasta"):
@@ -65,9 +59,7 @@ def create_fake_topological_fastq(topological_fasta_file_name, fastq_file):
                 record.letter_annotations["phred_quality"] = [40] * len(record)
                 SeqIO.write(record, output_handle, "fastq")
 
-# This function runs Bowtie, which is a tool for aligning short DNA sequences
 def run_bowtie(sgrna_fastq_file_name, topological_fasta_file_name, sam_file_name, num_mismatches, num_threads):
-
     index_prefix = "genome_index"
 
     with open(os.devnull, "w") as devnull:
@@ -82,7 +74,6 @@ def run_bowtie(sgrna_fastq_file_name, topological_fasta_file_name, sam_file_name
             stderr=devnull,
         )
         
-        # Remove the index files, which names start with the index_prefix and end with ebwt
         for file in os.listdir("."):
             if file.startswith(index_prefix) and file.endswith(".ebwt"):
                 os.remove(file)
@@ -193,51 +184,36 @@ def extract_pam(pam, tar_start, tar_end, chrom, topological_fasta_file_name, dir
 
 
 def get_diff(spacer, target):
-    # Initialize an empty list to store the differences
     differences = []
     
-    # Iterate through the nucleotides in the target and spacer sequences
     for i, (target_nt, spacer_nt) in enumerate(zip(target, spacer)):
-        # Check if the nucleotides differ at the current position
         if target_nt != spacer_nt:
-            # Record the difference in the format "target_nucleotide position spacer_nucleotide"
             diff_string = f"{target_nt}{i + 1}{spacer_nt}"
-            # diff_string = f"{target_nt}{i}{spacer_nt}"
             
             differences.append(diff_string)
     
-    # Join the list of differences into a single string, separated by commas
     diff_result = ",".join(differences)
     
-    # If there are no differences, return None
     if not diff_result:
         return None
     
     return diff_result
 
 def get_coords(tar_start, tar_end, chrom_length):
-    # Take mod to account for circularity of chromosome
     start_circular = tar_start % chrom_length
     end_circular = tar_end % chrom_length if tar_end % chrom_length != 0 else chrom_length
 
-    # Condition when the end position loops back to the start of the chromosome
     if start_circular > end_circular:
         return f"({start_circular}..{chrom_length}, 0..{end_circular})"    
 
-    # Condition when start and end positions are in the same circular span
     return f"{start_circular}..{end_circular}"
 
 
 def get_offset(target_dir, tar_start, tar_end, feature_start, feature_end):
-    # If the direction of the target gene is forward ("F")
     if target_dir == "F":
-        # The offset is calculated as the start position of the target minus the start position of the feature
         return tar_start - feature_start
-    # If the direction of the target gene is reverse ("R")
     elif target_dir == "R":
-        # The offset is calculated as the end position of the feature minus the end position of the target
         return feature_end - tar_end
-    # Fallback case: Direction is neither forward nor reverse, return None
     else:
         return None
 
@@ -329,7 +305,7 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                     continue
                 
                 if len(aligned_genes) > 1:
-                    note[row_data["spacer"]].append(f"{len(aligned_genes)} overlap genes")
+                    note[row_data["spacer"]].append(f"{len(aligned_genes)} annotations")
 
                 for locus_tag, feature_start, feature_end, feature_strand in aligned_genes:
                     row_data_copy = row_data.copy()

@@ -9,11 +9,11 @@ from datetime import datetime
 from multiprocessing import Pool, cpu_count
 from typing import List, Set, Tuple
 
+import rich
 import zstandard as zstd
 from Bio.Seq import Seq
 from rich.console import Console
 from rich.table import Table
-import rich
 
 
 def rev_comp(sequence: str) -> str:
