@@ -8,6 +8,7 @@ import time
 from heapq import heappop, heappush
 from queue import Empty
 import os
+from multiprocessing import cpu_count
 
 import psutil
 import pyzstd
@@ -264,12 +265,9 @@ def writer_process(recv_end, output_filename, writer_sem):
 
     console.log(f"{writer_name} finished.", style="red")
 
-
-
-
 if __name__ == "__main__":
     # Configuration
-    num_sorters = 12
+    num_sorters = cpu_count() // 2
     filenames = sys.argv[1:]
 
     def get_output_filename(filename):

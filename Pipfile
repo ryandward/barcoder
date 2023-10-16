@@ -12,8 +12,10 @@ tabulate = "*"
 zstandard = "*"
 pyzstd = "*"
 psutil = "*"
+rich-cli = "*"
 
 [dev-packages]
+pylint = "*"
 
 [requires]
 python_version = "3.11"

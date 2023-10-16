@@ -7,22 +7,26 @@ from collections import Counter, defaultdict
 from contextlib import nullcontext
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
-from typing import List, Tuple
-from collections import Counter
 from typing import List, Set, Tuple
-
-from collections import Counter
-from typing import List, Tuple, Set
 
 import zstandard as zstd
 from Bio.Seq import Seq
 from rich.console import Console
 from rich.table import Table
-
 import rich
+
+
+def rev_comp(sequence: str) -> str:
+    return sequence[::-1].translate(str.maketrans("ATCGN", "TAGCN"))
+
 
 def safe_len(s):
     return 0 if s is None else len(s)
+
+
+def generate_kmers(seq: str, k: int) -> Set[str]:
+    return {seq[i:i + k] for i in range(len(seq) - k + 1)}
+
 
 def read_fasta(fasta_file) -> Set[str]:
     barcodes = set()
@@ -33,7 +37,8 @@ def read_fasta(fasta_file) -> Set[str]:
                 barcodes.add(line.strip())
     return barcodes
 
-def open_file(file_path, mode):
+
+def open_reads_file(file_path, mode):
     if file_path.endswith('.gz'):
         return gzip.open(file_path, mode)
     elif file_path.endswith('.zst'):
@@ -46,7 +51,6 @@ def open_file(file_path, mode):
         raise ValueError("Unsupported file type.")
 
 def read_in_chunks(file1, file2=None, chunk_size=2**16) -> Tuple[List[str], List[str]]:
-
     reads1, reads2 = [], []
     
     # Remove compression extension if present
@@ -62,7 +66,7 @@ def read_in_chunks(file1, file2=None, chunk_size=2**16) -> Tuple[List[str], List
     else:
         raise ValueError("Unsupported file type. Must be '.fastq' or '.reads'.")
     
-    with open_file(file1, 'rt') as f1, (open_file(file2, 'rt') if file2 else nullcontext()) as f2:
+    with open_reads_file(file1, 'rt') as f1, (open_reads_file(file2, 'rt') if file2 else nullcontext()) as f2:
         iters = [iter(f1), iter(f2) if f2 else iter([])]
         
         while True:
@@ -97,97 +101,102 @@ def read_in_chunks(file1, file2=None, chunk_size=2**16) -> Tuple[List[str], List
             yield (reads1, reads2 if reads2 else None)
 
 
-def contains_bc(seq, barcodes, bc_len) -> bool:
-    if seq is None:
-        return False
-    for i in range(0, len(seq) - bc_len + 1):
-        kmer = seq[i:i + bc_len]
-        if kmer in barcodes:
-            return True
-    return False
 
 
-def sample_data(file1, file2, barcodes, is_paired) -> Tuple[int, bool, Set[str], Set[str]]:
+
+
+def sample_data(file1, file2, barcodes, is_paired):
+
+    rev_barcodes = set(rev_comp(bc) for bc in barcodes)
     bc_len = len(next(iter(barcodes)))
-    valid_samples1 = set()
-    valid_samples2 = set()
-    total_reads_sampled = 0
-    new_reads_sampled = 0
-
     chunk_generator = read_in_chunks(file1, file2 if is_paired else None, chunk_size=len(barcodes))
+    processed_count = 0
 
-    for read1_chunk, read2_chunk in chunk_generator:            
-        for read1, read2 in zip(read1_chunk, read2_chunk if read2_chunk else [None]*len(read1_chunk)):
-            total_reads_sampled += 1
-            
-            if read2 and (read1 in valid_samples1 or (read2 in valid_samples2)):
-                continue
-            elif read1 in valid_samples1:
-                continue
-
-            new_reads_sampled += 1
-
-            bc_F_in_read1 = contains_bc(read1, barcodes, bc_len) if read1 else None
-            bc_F_in_read2 = contains_bc(read2, barcodes, bc_len) if read2 else None
-
-            bc_R_in_read1 = contains_bc(read1[::-1 or 0].translate(str.maketrans("ATCGN", "TAGCN")), barcodes, bc_len) if read1 else None
-            bc_R_in_read2 = contains_bc(read2[::-1 or 0].translate(str.maketrans("ATCGN", "TAGCN")), barcodes, bc_len) if read2 else None
-            
-            if is_paired:
-                if bc_F_in_read1 and bc_R_in_read2:
-                    valid_samples1.add(read1)
-                    valid_samples2.add(read2)
-                if bc_R_in_read1 and bc_F_in_read2:
-                    valid_samples1.add(read1)
-                    valid_samples2.add(read2)
-            else:
-                if bc_F_in_read1:
-                    valid_samples1.add(read1)
-                    valid_samples2 = None # Placeholder until we can determine the orientation of read1
-                if bc_R_in_read1:
-                    valid_samples1.add(read1)
-                    valid_samples2 = None # Placeholder until we can determine the orientation of read1
-
-            if len(valid_samples1) > len(barcodes):
-                break
-
-    total_count1 = sum(1 for read in valid_samples1 if read and contains_bc(read, barcodes, bc_len)) if valid_samples1 else 0
-    total_count2 = sum(1 for read in valid_samples2 if read and contains_bc(read, barcodes, bc_len)) if valid_samples2 else 0
-
-    need_swap = False
-    if is_paired:
-        need_swap = total_count2 > total_count1
-    else:  # Single-end
-        # Count barcodes in reverse complement of read1
-        rc_count = sum(1 for read in valid_samples1 if contains_bc(read[::-1].translate(str.maketrans("ATCGN", "TAGCN")), barcodes, bc_len))
-        need_swap = rc_count > total_count1
-
-    return new_reads_sampled, need_swap, valid_samples1, valid_samples2
-
-def find_start_positions(reads, barcodes, bc_len, rev=False):
-
-    if reads is None:
-        return None
+    # Overall Counters
+    global_read1_orientations = Counter()
+    global_read1_offsets = Counter()
+    global_read2_orientations = Counter()
+    global_read2_offsets = Counter()
     
-    offset_counts = Counter()
-    for read in reads:
+    # Sets to determine sampling depth
+    seen_reads = set()
+    valid_reads1 = set()
+    valid_reads2 = set()
 
-        for i in range(len(read) - bc_len + 1):
-            kmer = read[i:i+bc_len]
-            if rev:
-                kmer = kmer[::-1].translate(str.maketrans("ATCGN", "TAGCN"))
-            if kmer in barcodes:
-                offset_counts[i] += 1
-    return offset_counts.most_common(1)[0][0] if offset_counts else None
+    for read1_chunk, read2_chunk in chunk_generator:
+
+        # Lists to collect orientations and offsets for this chunk
+        read1_orientations = []
+        read1_offsets = []
+
+        read2_orientations = []
+        read2_offsets = []
+
+        for read1, read2 in zip(read1_chunk, read2_chunk if read2_chunk else [None] * len(read1_chunk)):
+            # Bypass pairs of reads if the read1 or read2 has been seen before
+            if read1 in seen_reads or (read2 and read2 in seen_reads):
+                continue
+
+            seen_reads.add(read1)
+            if read2:
+                seen_reads.add(read2)
+
+            for i in range(len(read1) - bc_len + 1):
+                kmer = read1[i:i+bc_len]
+                if kmer in barcodes:
+                    read1_orientations.append('forward')
+                    read1_offsets.append(i)
+                    valid_reads1.add(read1)
+
+                elif kmer in rev_barcodes:
+                    read1_orientations.append('reverse')
+                    read1_offsets.append(i)
+                    valid_reads1.add(read1)
+                
+                if is_paired:
+                    kmer2 = read2[i:i+bc_len]
+                    if kmer2 in barcodes:
+                        read2_orientations.append('forward')
+                        read2_offsets.append(i)
+                        valid_reads2.add(read2)
+
+                    elif kmer2 in rev_barcodes:
+                        read2_orientations.append('reverse')
+                        read2_offsets.append(i)
+                        valid_reads2.add(read2)
+
+            processed_count += 1
+
+        # Update the global counters after processing each chunk
+        global_read1_orientations.update(read1_orientations)
+        global_read1_offsets.update(read1_offsets)
+
+        global_read2_orientations.update(read2_orientations)
+        global_read2_offsets.update(read2_offsets)
+
+        if len(valid_reads1) >= len(barcodes) and (not read2 or len(valid_reads2) >= len(barcodes)) and processed_count >= 2 * len(barcodes):
+            break
+            
+    read1_orientation = Counter(global_read1_orientations).most_common(1)[0][0] if read1 else None
+    read1_offset = Counter(global_read1_offsets).most_common(1)[0][0] if read1 else None
+
+    read2_orientation = Counter(global_read2_orientations).most_common(1)[0][0] if read2 else None
+    read2_offset = Counter(global_read2_offsets).most_common(1)[0][0] if read2 else None
+
+    if(read1_orientation == 'forward' or read2_orientation == 'reverse'):
+        need_swap = False
+        return(processed_count, read1_offset, read2_offset, valid_reads1, valid_reads2, need_swap)
+
+    elif(read1_orientation == 'reverse' or read2_orientation == 'forward'):
+        need_swap = True
+        return(processed_count, read2_offset, read1_offset, valid_reads2, valid_reads1, need_swap)
+
+    else: raise ValueError("Unable to determine orientation of reads.")
 
 
-def generate_kmers(seq: str, k: int) -> Set[str]:
-    return {seq[i:i + k] for i in range(len(seq) - k + 1)}
-
-
-def find_ends(reads: List[str], barcodes: Set[str], start: int, bc_len: int, max_flank: int = 4, rev: bool = False) -> Tuple[str, str]:
+def find_flanks(reads: List[str], barcodes: Set[str], start: int, bc_len: int, max_flank: int = 4) -> Tuple[str, str]:
     # Initialize maximum lengths for L_flank and R_flank flanks; reverse if the 'rev' flag is set.
-    L_max, R_max = (max_flank, max_flank) if not rev else (max_flank, max_flank)[::-1]
+    L_max, R_max = (max_flank, max_flank) 
 
     # Counters to store occurrences of L_flank and R_flank flanking sequences.
     L_flanks, R_flanks = Counter(), Counter()
@@ -222,8 +231,7 @@ def find_ends(reads: List[str], barcodes: Set[str], start: int, bc_len: int, max
         update_flanks("R_flank", R_flank, R_max)
 
     def extract_best_flank(counts: Counter) -> str:
-        """Identify the most suitable flanking sequence. 
-        To justify using a shorter flank, it must be at least twice as common as the next longer one."""
+        """To justify using a shorter flank, it must be at least twice as common as the next longer one."""
         most_common_next = None
         for bc_len in range(max_flank, 0, -1):
             # Find sequences of the current length from the counter
@@ -280,7 +288,7 @@ def process_chunk(chunk, bcs_with_flanks_fwd, bcs_with_flanks_rev, L_fwd_start, 
             in_bcs_with_flanks_fwd, has_flanks_fwd, seq1 = validate_read(seq_with_flanks_fwd, L_fwd, R_fwd)
             in_bcs_with_flanks_rev, has_flanks_rev, seq2 = validate_read(seq_with_flanks_rev, L_rev, R_rev, rev=True)
 
-            if seq1 != seq2[::-1].translate(str.maketrans("ATCGN", "TAGCN")): 
+            if seq1 != rev_comp(seq2): 
                 continue
             
             if in_bcs_with_flanks_fwd and in_bcs_with_flanks_rev and has_flanks_fwd and has_flanks_rev:
@@ -324,7 +332,7 @@ def main(args):
     # Reading FASTA File
     console.log("Reading barcodes...")
     barcodes = read_fasta(args.fasta_file)
-    bcs_rev = {barcode[::-1].translate(str.maketrans("ATCGN", "TAGCN")) for barcode in barcodes}
+    bcs_rev = {rev_comp(barcode) for barcode in barcodes}
     
     bc_len = len(next(iter(barcodes)))
 
@@ -335,50 +343,25 @@ def main(args):
 
     # Initialize
     console.log("Determining orientation of reads...")
-    new_reads_sampled, need_swap, sample1, sample2 = sample_data(reads1, reads2, barcodes, is_paired)
-    console.log(f"Sampled {new_reads_sampled:,} unique reads and found {safe_len(sample1):,} File_1 and {safe_len(sample2):,} File_2 valid matches...")
-    console.log(f"Swapping reads..." if need_swap else f"Proceeding with reads as is...")                
 
-    # Apply the swap logic
-    if need_swap:
-        sample1, sample2 = sample2, sample1
-        reads1, reads2 = reads2, reads1
+    new_reads_sampled, bc_start1, bc_start2, sample1, sample2, need_swap = sample_data(reads1, reads2, barcodes, is_paired)
 
-    # Initialize to None
-    bc_start1 = None
-    bc_start2 = None        
+    console.log(f"Sampled {new_reads_sampled:,} unique reads and found {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse valid matches...")
+    console.log(f"Swapping orientation..." if need_swap else f"Proceeding with reads in orientation provided...")                
 
-    # Skip finding barcode starts for single-end that needed a swap
-    if sample1 is not None:
-        console.log("Finding fwd coordinates...")
-        bc_start1 = find_start_positions(sample1, barcodes, bc_len)
-        if bc_start1 is None:
-            console.log("[bold red]No barcodes found in sample 1. Exiting.[/bold red]")
-            sys.exit(1)
-
-    # For paired-end or single-end that needed a swap
-    if sample2:
-        console.log("Finding reverse coordinates...")
-        bc_start2 = find_start_positions(sample2, barcodes, bc_len, rev=True)
-        if bc_start2 is None:
-            console.log("[bold red]No barcodes found in sample 2. Exiting.[/bold red]")
-            sys.exit(1)
-    else:
-        # Set bc_start2 to an empty list to be consistent with bc_start1
-        bc_start2 = None
 
     # Find flanking sequences
     if sample1 is not None:
-        console.log("Identifying forward read flanks...")
-        L_fwd, R_fwd = find_ends(sample1, barcodes, bc_start1, bc_len)
+        console.log("Identifying forward flanking sequences...")
+        L_fwd, R_fwd = find_flanks(sample1, barcodes, bc_start1, bc_len)
         L_fwd_start = bc_start1 - len(L_fwd) if L_fwd else 0
     else:
         L_fwd, R_fwd = None, None
         L_fwd_start = None
 
     if sample2 is not None:
-        console.log("Identifying reverse read flanks...")
-        L_rev, R_rev = find_ends(sample2, bcs_rev, bc_start2, bc_len, rev=True)
+        console.log("Identifying reverse flanking sequences...")
+        L_rev, R_rev = find_flanks(sample2, bcs_rev, bc_start2, bc_len)
         L_rev_start =  bc_start2 - len(L_rev) if L_rev else 0
     else:
         L_rev, R_rev = None, None
@@ -386,8 +369,8 @@ def main(args):
 
 
    # Calculate reverse complements
-    L_rev_rev = L_rev[::-1].translate(str.maketrans("ATCGN", "TAGCN")) if L_rev else None
-    R_rev_rev = R_rev[::-1].translate(str.maketrans("ATCGN", "TAGCN")) if R_rev else None
+    L_rev_rev = rev_comp(L_rev) if L_rev else None
+    R_rev_rev = rev_comp(R_rev) if R_rev else None
 
     # Check if the fwd and reverse flanking sequences are reverse complements
     L_min_len = R_min_len = 0
@@ -404,9 +387,7 @@ def main(args):
             console.log("[bold red]Error: Forward and reverse R_flank flanking sequences are not reverse complements.[/bold red]")
             sys.exit(1)
 
-    def add_flank(barcodes, L_flank=None, R_flank=None, rev=False):
-        if rev:
-            barcodes = {barcode[::-1].translate(str.maketrans("ATCGN", "TAGCN")) for barcode in barcodes}
+    def add_flank(barcodes, L_flank=None, R_flank=None):
         L_flank, R_flank = (L_flank or ""), (R_flank or "")
         return {L_flank + barcode + R_flank for barcode in barcodes}
     
