@@ -231,7 +231,6 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
     unique_rows = {}
     true_chrom_lengths = get_true_chrom_lengths(gb_file_name)
     topological_chrom_lengths = get_topological_chrom_lengths(topological_fasta_file_name)
-    note = defaultdict(list)
 
     with pysam.AlignmentFile(sam_file_name, "r") as samfile:
         for read in samfile.fetch():
@@ -304,13 +303,15 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                     unique_rows[hash_row(row_data)] = row_data                
                     continue
                 
-                if len(aligned_genes) > 1:
-                    note[row_data["spacer"]].append(f"{len(aligned_genes)} annotations")
-
                 for locus_tag, feature_start, feature_end, feature_strand in aligned_genes:
                     row_data_copy = row_data.copy()
                     target_orientation = "F" if feature_strand == 1 else "R" if feature_strand == -1 else None
-                    offset_value = get_offset(target_orientation, row_data_copy['tar_start'], row_data_copy['tar_end'], feature_start, feature_end)
+                    offset_value = get_offset(
+                        target_orientation, 
+                        row_data_copy['tar_start'], 
+                        row_data_copy['tar_end'], 
+                        feature_start, 
+                        feature_end)
 
                     row_data_copy.update({
                         'locus_tag': locus_tag, 
@@ -328,27 +329,40 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
 
     unique_rows = filter_offtargets_by_pam(unique_rows)
 
+    note = {}
+
     # Create a dictionary to store unique coordinates for each name
     coords_by_spacer = {}
     for row in unique_rows.values():
         spacer = row['spacer']
         coords = row['coords']
         if spacer not in coords_by_spacer:
-            coords_by_spacer[spacer] = set()
-        coords_by_spacer[spacer].add(coords)
+            coords_by_spacer[spacer] = []
+        coords_by_spacer[spacer].append(coords)
 
-    # Update notes based on the number of unique coordinates
+    # Update notes based on the number of unique coordinates and ambiguous annotations
     for spacer, coords in coords_by_spacer.items():
-        if len(coords) > 1:
-            note[spacer].append(f"{len(coords)} targets")
+        unique_coords = set(coords)
+        if len(unique_coords) > 1:
+            if spacer not in note:
+                note[spacer] = []
+            note[spacer].append(f"{len(unique_coords)} targets")
+        
+        # Add note for ambiguous annotations
+        for coord in unique_coords:
+            count = coords.count(coord)
+            if count > 1:
+                if spacer not in note:
+                    note[spacer] = []
+                note[spacer].append(f"{count} annotations")
 
     # Join the notes and add them to the corresponding rows in unique_rows
     for row_data in unique_rows.values():
         spacer = row_data['spacer']
         if spacer in note:
-            row_data['note'] = '; '.join(note[spacer])
+            row_data['note'] = ', '.join(note[spacer])
 
-    # return unique unique_rows
+    # return unique_rows
     return unique_rows
 
 
