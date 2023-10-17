@@ -59,6 +59,7 @@ def create_fake_topological_fastq(topological_fasta_file_name, fastq_file):
                 record.letter_annotations["phred_quality"] = [40] * len(record)
                 SeqIO.write(record, output_handle, "fastq")
 
+
 def run_bowtie(sgrna_fastq_file_name, topological_fasta_file_name, sam_file_name, num_mismatches, num_threads):
     index_prefix = "genome_index"
 
@@ -78,12 +79,13 @@ def run_bowtie(sgrna_fastq_file_name, topological_fasta_file_name, sam_file_name
             if file.startswith(index_prefix) and file.endswith(".ebwt"):
                 os.remove(file)
 
+
 def create_locus_map(genbank_file_name):
-    locus_map, overhangs, organisms, seq_lens, topologies = {}, {}, {}, {}, {}
+    locus_map, overhang_continue, organisms, seq_lens, topologies = {}, {}, {}, {}, {}
 
     with open(genbank_file_name, "rt") as input_handle:
         for record in SeqIO.parse(input_handle, "genbank"):
-            overhangs[record.id] = 0
+            overhang_continue[record.id] = 0
             organisms[record.id] = record.annotations.get('organism', None)
             seq_lens[record.id] = len(record.seq)
             topologies[record.id] = record.annotations.get('topology', None)
@@ -92,50 +94,49 @@ def create_locus_map(genbank_file_name):
 
             for feature in record.features:
                 if feature.type == "gene":
-                    for part_location in feature.location.parts if isinstance(feature.location, CompoundLocation) else [feature.location]:
+                    
+                    if isinstance(feature.location, CompoundLocation) and any(part.start == 0 or part.end == len(record.seq) for part in feature.location.parts):
                         
-                        # Skip the gene segment that wraps around the genome
-                        if part_location.end == seq_lens[record.id]:
-                            continue
+                        # Find segments that wrap around the genome
+                        genome_end_segment = next(part for part in feature.location.parts if part.end == len(record.seq))
+                        genome_start_segment = next(part for part in feature.location.parts if part.start == 0)
+                        
+                        # Adjust positions
+                        adj_start = int(genome_end_segment.start)
+                        adj_end = int(genome_start_segment.end + len(record.seq))
+                        overhang_continue[record.id] = int(genome_start_segment.end)
 
-                        for position in range(int(part_location.start), int(part_location.end)):
+                        # Iterate over the adjusted range
+                        for position in range(adj_start, adj_end):
                             key = (record.id, position)
                             locus_map.setdefault(key, []).append(
                                 (feature.qualifiers.get("locus_tag", [None])[0],
-                                int(part_location.start),
-                                int(part_location.end),
+                                adj_start,
+                                adj_end,
                                 feature.strand)
                             )
 
-                        # Handle special case: gene that wraps around the genome
-                        if part_location.start == 0 and feature.location.parts[-1].end == seq_lens[record.id]:
-                            # Store the end of the first segment for later use as overhang
-                            overhangs[record.id] = feature.location.parts[0].end
-                            # Add the gene that wraps around to the locus_map
-                            for position in range(feature.location.parts[-1].start, part_location.end + seq_lens[record.id]):
+                    else:
+                        # normal genes
+                        for part_location in feature.location.parts if isinstance(feature.location, CompoundLocation) else [feature.location]:
+                            for position in range(int(part_location.start), int(part_location.end)):
                                 key = (record.id, position)
                                 locus_map.setdefault(key, []).append(
                                     (feature.qualifiers.get("locus_tag", [None])[0],
-                                    int(feature.location.parts[-1].start),
-                                    int(feature.location.parts[-1].end + part_location.end),
+                                    int(part_location.start),
+                                    int(part_location.end),
                                     feature.strand)
                                 )
 
-    # Add overhang entries to the locus_map
-    with open(genbank_file_name, "rt") as input_handle:
-        for record in SeqIO.parse(input_handle, "genbank"):
-            for feature in record.features:
-                if feature.type == "gene":
-                    for part_location in feature.location.parts if isinstance(feature.location, CompoundLocation) else [feature.location]:
-                        for position in range(int(part_location.start), int(part_location.end)):
-                            if position > overhangs[record.id] and position <= overhang_length:
-                                key = (record.id, position + seq_lens[record.id])
-                                locus_map.setdefault(key, []).append(
-                                    (feature.qualifiers.get("locus_tag", [None])[0],
-                                    int(part_location.start) + seq_lens[record.id],
-                                    int(part_location.end) + seq_lens[record.id],
-                                    feature.strand)
-                                )
+                                # add the rest of the overhang
+                                if overhang_continue[record.id] <= position < overhang_length:
+                                    key = (record.id, position + len(record.seq))
+                                    locus_map.setdefault(key, []).append(
+                                        (feature.qualifiers.get("locus_tag", [None])[0],
+                                        int(part_location.start) + len(record.seq),
+                                        int(part_location.end) + len(record.seq),
+                                        feature.strand)
+                                    )
 
     return locus_map, organisms, seq_lens, topologies
 
@@ -216,6 +217,17 @@ def get_offset(target_dir, tar_start, tar_end, feature_start, feature_end):
         return feature_end - tar_end
     else:
         return None
+    
+def get_overlap(tar_start, tar_end, feature_start, feature_end):
+    overlap_start = max(tar_start, feature_start)
+    overlap_end = min(tar_end, feature_end)
+
+    # Check if there's any overlap
+    if overlap_start < overlap_end:
+        return overlap_end - overlap_start
+    else:
+        return 0
+
 
 def hash_row(row_data):
     canonical_str = "".join([f"{k}:{v}|" for k, v in sorted(row_data.items(), key=lambda x: x[0])])
@@ -245,17 +257,17 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                 'len': len(read.query_sequence),
            }
 
-            # exclude reads that don't match the PAM
-            if not read.is_unmapped and not pam_matches(pam, extracted_pam):
-                read.is_unmapped = True
-            
-            # skip reads where topological map ran off the end of the chromosome
-            if not read.is_unmapped and extracted_pam is None:
-                continue
+            if not read.is_unmapped:
+                # exclude reads that don't match the PAM
+                if not pam_matches(pam, extracted_pam):
+                    read.is_unmapped = True
+                # skip reads where topological map ran out
+                if extracted_pam is None:
+                    continue
         
             if read.is_unmapped:
                 row_data.update({
-                    'type': 'non-targeting',
+                    'type': 'control',
                     'chr': None,
                     'tar_start': None,
                     'tar_end': None,
@@ -266,12 +278,12 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                     'diff': None,
                     'coords': None,
                     'locus_tag': None, 
-                    'offset': None, 
+                    'offset': None,
+                    'overlap': None,
                     'tar_dir': None
                 })
 
-                unique_key = hash_row(row_data)
-                unique_rows[unique_key] = row_data
+                unique_rows[hash_row(row_data)] = row_data
                 continue
             
             if not read.is_unmapped:
@@ -291,13 +303,14 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                     'diff': get_diff(row_data['spacer'], row_data['target'])
                 })
 
-                aligned_genes = {gene_info for pos in range(row_data['tar_start'], row_data['tar_end'])
+                aligned_genes = {gene_info for pos in range(read.reference_start, read.reference_end)
                                 for gene_info in locus_map.get((row_data['chr'], pos), [])}
 
                 if not aligned_genes:
                     row_data.update({
                         'locus_tag': None, 
                         'offset': None, 
+                        'overlap': None,
                         'tar_dir': None
                     })
                     unique_rows[hash_row(row_data)] = row_data                
@@ -306,16 +319,11 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                 for locus_tag, feature_start, feature_end, feature_strand in aligned_genes:
                     row_data_copy = row_data.copy()
                     target_orientation = "F" if feature_strand == 1 else "R" if feature_strand == -1 else None
-                    offset_value = get_offset(
-                        target_orientation, 
-                        row_data_copy['tar_start'], 
-                        row_data_copy['tar_end'], 
-                        feature_start, 
-                        feature_end)
-
+                    
                     row_data_copy.update({
                         'locus_tag': locus_tag, 
-                        'offset': offset_value, 
+                        'offset': get_offset(target_orientation, read.reference_start, read.reference_end, feature_start, feature_end),
+                        'overlap': get_overlap(read.reference_start, read.reference_end, feature_start, feature_end),
                         'tar_dir': target_orientation
                     })
                     
@@ -356,6 +364,34 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                     note[spacer] = []
                 note[spacer].append(f"{count} annotations")
 
+    # Check if the target is None, and if so, add a note
+    for row_data in unique_rows.values():
+        target = row_data['target']
+        if target is None:
+            continue
+        spacer = row_data['spacer']
+        locus_tag = row_data['locus_tag']
+        if locus_tag is None:
+            if spacer not in note:
+                note[spacer] = []
+            note[spacer].append("intergenic")
+
+    # Check if target spans the origin of replication
+    for row_data in unique_rows.values():
+        target = row_data['target']
+        if target is None:
+            continue
+
+        spacer = row_data['spacer']
+        tar_start = row_data['tar_start']
+        tar_end = row_data['tar_end']
+        chrom = row_data['chr']
+
+        if tar_start % true_chrom_lengths.get(chrom, None) > tar_end % true_chrom_lengths.get(chrom, None):
+            if spacer not in note:
+                note[spacer] = []
+            note[spacer].append("spans origin")
+   
     # Join the notes and add them to the corresponding rows in unique_rows
     for row_data in unique_rows.values():
         spacer = row_data['spacer']
@@ -415,9 +451,11 @@ def main(args):
         console.log("Finding matches...")    
         results = parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, args.genome_file, args.pam)
         results = pd.DataFrame.from_dict(results, orient='index')
-        column_order = ['name', 'spacer', 'pam', 'chr', 'locus_tag', 'target', 'type', 'mismatches', 'diff', 'coords', 'offset', 'sp_dir', 'tar_dir', 'note']
+        # column_order = ['name', 'spacer', 'pam', 'chr', 'locus_tag', 'target', 'type', 'mismatches', 'diff', 'coords', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note']
+        column_order = ['name', 'spacer', 'pam', 'chr', 'locus_tag', 'target', 'mismatches', 'coords', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note']
+
         results = results[column_order]
-        integer_cols = ['mismatches', 'offset']
+        integer_cols = ['mismatches', 'offset', 'overlap']
         
         results[integer_cols] = results[integer_cols].astype('Int64')
 
@@ -503,6 +541,9 @@ def main(args):
     # Barcode Mapping Stats Sub-heading
     combined_table.add_section()
     combined_table.add_row("[bold bright_green]Barcode Mapping Stats[/bold bright_green]", "")
+
+    unique_chrs = len(set(x for x in results['chr'] if x is not None))
+    combined_table.add_row("Chromosomes Targeted", f"[bold]{unique_chrs:,}[/bold]")
 
     unique_tags = len(set(x for x in results['locus_tag'] if x is not None))
     combined_table.add_row("Genes Targeted", f"[bold]{unique_tags:,}[/bold]")
