@@ -102,15 +102,13 @@ def read_in_chunks(file1, file2=None, chunk_size=2**16) -> Tuple[List[str], List
 
 
 
-
-
-
 def sample_data(file1, file2, barcodes, is_paired):
 
     rev_barcodes = set(rev_comp(bc) for bc in barcodes)
     bc_len = len(next(iter(barcodes)))
     chunk_generator = read_in_chunks(file1, file2 if is_paired else None, chunk_size=len(barcodes))
-    processed_count = 0
+    processed_count1 = 0
+    processed_count2 = 0
 
     # Overall Counters
     global_read1_orientations = Counter()
@@ -133,6 +131,8 @@ def sample_data(file1, file2, barcodes, is_paired):
         read2_offsets = []
 
         for read1, read2 in zip(read1_chunk, read2_chunk if read2_chunk else [None] * len(read1_chunk)):
+            valid_kmers = set()
+
             # Bypass pairs of reads if the read1 or read2 has been seen before
             if read1 in seen_reads or (read2 and read2 in seen_reads):
                 continue
@@ -144,28 +144,45 @@ def sample_data(file1, file2, barcodes, is_paired):
             for i in range(len(read1) - bc_len + 1):
                 kmer = read1[i:i+bc_len]
                 if kmer in barcodes:
+                    if kmer in valid_kmers:
+                        continue
+                    valid_kmers.add(kmer)
                     read1_orientations.append('forward')
                     read1_offsets.append(i)
                     valid_reads1.add(read1)
+                    processed_count1 += 1
+
 
                 elif kmer in rev_barcodes:
+                    if kmer in valid_kmers:
+                        continue
+                    valid_kmers.add(kmer)
                     read1_orientations.append('reverse')
                     read1_offsets.append(i)
                     valid_reads1.add(read1)
+                    processed_count1 += 1
+
                 
                 if is_paired:
                     kmer2 = read2[i:i+bc_len]
                     if kmer2 in barcodes:
+                        if kmer2 in valid_kmers:
+                            continue
+                        valid_kmers.add(kmer2)
                         read2_orientations.append('forward')
                         read2_offsets.append(i)
                         valid_reads2.add(read2)
+                        processed_count2 += 1
+
 
                     elif kmer2 in rev_barcodes:
+                        if kmer2 in valid_kmers:
+                            continue
+                        valid_kmers.add(kmer2)
                         read2_orientations.append('reverse')
                         read2_offsets.append(i)
                         valid_reads2.add(read2)
-
-            processed_count += 1
+                        processed_count2 += 1
 
         # Update the global counters after processing each chunk
         global_read1_orientations.update(read1_orientations)
@@ -174,8 +191,8 @@ def sample_data(file1, file2, barcodes, is_paired):
         global_read2_orientations.update(read2_orientations)
         global_read2_offsets.update(read2_offsets)
 
-        if len(valid_reads1) >= len(barcodes) and (not read2 or len(valid_reads2) >= len(barcodes)) and processed_count >= 2 * len(barcodes):
-            break
+        if read2 and processed_count1 >= len(barcodes) and  processed_count2 >= len(barcodes): break
+        elif not read2 and processed_count2 >= len(barcodes): break
             
     read1_orientation = Counter(global_read1_orientations).most_common(1)[0][0] if read1 else None
     read1_offset = Counter(global_read1_offsets).most_common(1)[0][0] if read1 else None
@@ -185,20 +202,16 @@ def sample_data(file1, file2, barcodes, is_paired):
 
     if(read1_orientation == 'forward' or read2_orientation == 'reverse'):
         need_swap = False
-        return(processed_count, read1_offset, read2_offset, valid_reads1, valid_reads2, need_swap)
+        return(processed_count1 + processed_count2, read1_offset, read2_offset, valid_reads1, valid_reads2, need_swap)
 
     elif(read1_orientation == 'reverse' or read2_orientation == 'forward'):
         need_swap = True
-        return(processed_count, read2_offset, read1_offset, valid_reads2, valid_reads1, need_swap)
+        return(processed_count1 + processed_count2, read2_offset, read1_offset, valid_reads2, valid_reads1, need_swap)
 
     else: raise ValueError("Unable to determine orientation of reads.")
 
 
-def find_flanks(reads: List[str], barcodes: Set[str], start: int, bc_len: int, max_flank: int = 4) -> Tuple[str, str]:
-    # Initialize maximum lengths for L_flank and R_flank flanks; reverse if the 'rev' flag is set.
-    L_max, R_max = (max_flank, max_flank) 
-
-    # Counters to store occurrences of L_flank and R_flank flanking sequences.
+def find_flanks(reads: List[str], start: int, bc_len: int, max_flank: int = 4) -> Tuple[str, str]:
     L_flanks, R_flanks = Counter(), Counter()
 
     def update_flanks(side: str, seq: str, max_len: int):
@@ -209,48 +222,39 @@ def find_flanks(reads: List[str], barcodes: Set[str], start: int, bc_len: int, m
             counts[truncated] += 1
 
     for read in reads:
-        # Generate kmers for the current read
-        kmers = generate_kmers(read, bc_len)
-        # Identify overlapping barcodes with the read's kmers
-        overlapping_bcs = barcodes & kmers
-        if not overlapping_bcs:
-            continue
-
-        # Find the starting position of the barcode in the read
-        common_start = read.find(next(iter(overlapping_bcs)))
-        # Update maximum possible L_flank and R_flank flanks based on the found position
-        L_max = min(L_max, common_start)
-        R_max = min(R_max, len(read) - (common_start + bc_len))
-
-        # Extract potential flanking sequences from the read
-        L_flank = read[common_start - L_max: common_start]
-        R_flank = read[common_start + bc_len: common_start + bc_len + R_max]
+        # Extract potential flanking sequences from the read based on start and bc_len
+        L_flank = read[start - max_flank : start] if start - max_flank >= 0 else read[0 : start]
+        R_flank = read[start + bc_len : start + bc_len + max_flank]
 
         # Update flank counters with sequences of varying lengths
-        update_flanks("L_flank", L_flank, L_max)
-        update_flanks("R_flank", R_flank, R_max)
+        update_flanks("L_flank", L_flank, len(L_flank))
+        update_flanks("R_flank", R_flank, len(R_flank))
 
     def extract_best_flank(counts: Counter) -> str:
-        """To justify using a shorter flank, it must be at least twice as common as the next longer one."""
-        most_common_next = None
-        for bc_len in range(max_flank, 0, -1):
-            # Find sequences of the current length from the counter
-            potential_seqs = [seq for seq in counts if len(seq) == bc_len]
+        most_common_prev = None
+        for fl_len in range(max_flank, 0, -1):
+            # print(f"Potential flank sequences: {counts}", file=sys.stderr)
+
+            potential_seqs = [seq for seq in counts if len(seq) == fl_len]
             if not potential_seqs:
                 continue
-            # Identify the most common sequence of the current length
             most_common = max(potential_seqs, key=lambda x: counts[x])
-            # If it's the maximum length or meets the "twice as common" criteria, return it
-            if bc_len == max_flank or counts[most_common] >= 2 * counts[most_common_next]:
-                return most_common
-            most_common_next = most_common
+            if fl_len == max_flank:
+                if most_common_prev is None or counts[most_common] > 3 * counts[most_common_prev]:
+                    return most_common
+            else:
+                if most_common_prev is not None and counts[most_common] > 3 * counts[most_common_prev]:
+                    return most_common
+                if most_common_prev is None or (counts[most_common] * 3 < counts[most_common_prev]):
+                    most_common_prev = most_common
         return None
 
-    # Extract the most appropriate L_flank and R_flank flanks using the criteria defined above
     L_most_common = extract_best_flank(L_flanks)
     R_most_common = extract_best_flank(R_flanks)
 
     return L_most_common, R_most_common
+
+
 
 
 def process_chunk(chunk, bcs_with_flanks_fwd, bcs_with_flanks_rev, L_fwd_start, L_rev_start, bc_len, L_fwd, R_fwd, L_rev, R_rev, need_swap) -> Tuple[Counter, int]:
@@ -353,7 +357,7 @@ def main(args):
     # Find flanking sequences
     if sample1 is not None:
         console.log("Identifying forward flanking sequences...")
-        L_fwd, R_fwd = find_flanks(sample1, barcodes, bc_start1, bc_len)
+        L_fwd, R_fwd = find_flanks(sample1, bc_start1, bc_len)
         L_fwd_start = bc_start1 - len(L_fwd) if L_fwd else 0
     else:
         L_fwd, R_fwd = None, None
@@ -361,7 +365,7 @@ def main(args):
 
     if sample2 is not None:
         console.log("Identifying reverse flanking sequences...")
-        L_rev, R_rev = find_flanks(sample2, bcs_rev, bc_start2, bc_len)
+        L_rev, R_rev = find_flanks(sample2, bc_start2, bc_len)
         L_rev_start =  bc_start2 - len(L_rev) if L_rev else 0
     else:
         L_rev, R_rev = None, None
