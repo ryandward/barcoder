@@ -100,21 +100,26 @@ def generate_mismatches(spacers, min_score, max_score, step, parameters, spacer_
 
 
 def main(args):
-    console=Console(file=sys.stderr)
+    console = Console(file=sys.stderr)
     console.log("[bold red]Initializing mismatch calculator[/bold red]")
-
 
     console.log(f'Reading parameters from {args.parameters_file}...')
     params = read_parameters(args.parameters_file)
 
     if args.mode == 'mismatches':
-        with open(args.spacers_file, 'r') as f:
-            spacers_original = [line.strip() for line in f.readlines() if line.strip()]
-            spacers = [spacer.upper() for spacer in spacers_original]  # Capitalize the sequences for processing
+        try:
+            data = pd.read_csv(args.spacers_file, sep='\t')
+        except Exception as e:
+            console.log(f'[bold red]Error reading input data file: {e}[/bold red]')
+            sys.exit(1)
 
         generate_header()
-        for spacer_original, spacer in zip(spacers_original, spacers):  # Modify this line to iterate over both original and capitalized sequences
-            generate_mismatches([spacer], args.min, args.max, args.step, params, spacer_original)  # Pass spacer_original as an additional argument
+
+        for index, row in data.iterrows():
+            spacer_original = row['target']  # Assuming 'target' is the column name for spacers
+            spacer = spacer_original.upper()
+            generate_mismatches([spacer], args.min, args.max, args.step, params, spacer_original)
+
 
     elif args.mode == 'recalculate':
         try:
