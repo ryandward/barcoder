@@ -309,6 +309,8 @@ def process_chunk(chunk, bcs_with_flanks_fwd, bcs_with_flanks_rev, L_fwd_start, 
             seq_with_flanks = record[start_pos:start_pos + len_L + bc_len + len_R]
             in_bcs_with_flanks, has_flanks, seq = validate_read(seq_with_flanks, L_flank, R_flank, rev=reverse)
             
+            if reverse: seq = rev_comp(seq)
+            
             if in_bcs_with_flanks and has_flanks:
                 counts[seq] += 1
             elif has_flanks:
