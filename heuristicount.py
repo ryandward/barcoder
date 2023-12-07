@@ -100,15 +100,15 @@ def read_in_chunks(file1, file2=None, chunk_size=2**16) -> Tuple[List[str], List
         if reads1:
             yield (reads1, reads2 if reads2 else None)
 
-
-
 def sample_data(file1, file2, barcodes, is_paired):
 
     rev_barcodes = set(rev_comp(bc) for bc in barcodes)
     bc_len = len(next(iter(barcodes)))
-    chunk_generator = read_in_chunks(file1, file2 if is_paired else None, chunk_size=len(barcodes))
+    chunk_generator = read_in_chunks(file1, file2 if is_paired else None, chunk_size = 10 * len(barcodes))
     processed_count1 = 0
     processed_count2 = 0
+    valid_count1 = 0
+    valid_count2 = 0
 
     # Overall Counters
     global_read1_orientations = Counter()
@@ -117,11 +117,17 @@ def sample_data(file1, file2, barcodes, is_paired):
     global_read2_offsets = Counter()
     
     # Sets to determine sampling depth
-    seen_reads = set()
     valid_reads1 = set()
     valid_reads2 = set()
 
+    seen_reads = set()
+
+    # Keep track of the unique barcodes seen in any orientation
+    unique_barcodes = set()
+
+
     for read1_chunk, read2_chunk in chunk_generator:
+
 
         # Lists to collect orientations and offsets for this chunk
         read1_orientations = []
@@ -129,60 +135,72 @@ def sample_data(file1, file2, barcodes, is_paired):
 
         read2_orientations = []
         read2_offsets = []
+        valid_kmers = set()
 
         for read1, read2 in zip(read1_chunk, read2_chunk if read2_chunk else [None] * len(read1_chunk)):
-            valid_kmers = set()
 
             # Bypass pairs of reads if the read1 or read2 has been seen before
             if read1 in seen_reads or (read2 and read2 in seen_reads):
                 continue
 
             seen_reads.add(read1)
-            if read2:
-                seen_reads.add(read2)
+            if read2: seen_reads.add(read2)
+            
+            processed_count1 += 1
+            if read2: processed_count2 += 1
 
             for i in range(len(read1) - bc_len + 1):
                 kmer = read1[i:i+bc_len]
                 if kmer in barcodes:
+
                     if kmer in valid_kmers:
+                        processed_count1 -= 1
                         continue
+                    valid_count1 += 1
                     valid_kmers.add(kmer)
+                    unique_barcodes.add(kmer)
                     read1_orientations.append('forward')
                     read1_offsets.append(i)
                     valid_reads1.add(read1)
-                    processed_count1 += 1
-
 
                 elif kmer in rev_barcodes:
+
                     if kmer in valid_kmers:
+                        processed_count1 -= 1
                         continue
+                    valid_count1 += 1
                     valid_kmers.add(kmer)
+                    unique_barcodes.add(kmer)
                     read1_orientations.append('reverse')
                     read1_offsets.append(i)
                     valid_reads1.add(read1)
-                    processed_count1 += 1
-
                 
                 if is_paired:
                     kmer2 = read2[i:i+bc_len]
                     if kmer2 in barcodes:
                         if kmer2 in valid_kmers:
+                            processed_count2 -= 1
                             continue
+                        valid_count2 += 1
                         valid_kmers.add(kmer2)
+                        unique_barcodes.add(kmer)
                         read2_orientations.append('forward')
                         read2_offsets.append(i)
                         valid_reads2.add(read2)
-                        processed_count2 += 1
-
 
                     elif kmer2 in rev_barcodes:
                         if kmer2 in valid_kmers:
+                            processed_count2 -= 1
                             continue
+                        valid_count2 += 1
                         valid_kmers.add(kmer2)
+                        unique_barcodes.add(kmer)
                         read2_orientations.append('reverse')
                         read2_offsets.append(i)
                         valid_reads2.add(read2)
-                        processed_count2 += 1
+        
+        # print(len(seen_reads), len(valid_kmers), len(valid_reads1), len(valid_reads2), valid_count1, valid_count2, file=sys.stderr)
+
 
         # Update the global counters after processing each chunk
         global_read1_orientations.update(read1_orientations)
@@ -191,8 +209,30 @@ def sample_data(file1, file2, barcodes, is_paired):
         global_read2_orientations.update(read2_orientations)
         global_read2_offsets.update(read2_offsets)
 
-        if read2 and processed_count1 >= len(barcodes) and  processed_count2 >= len(barcodes): break
-        elif not read2 and processed_count2 >= len(barcodes): break
+        read1_offsets_common = Counter(global_read1_offsets).most_common(2)
+        read2_offsets_common = Counter(global_read2_offsets).most_common(2)
+
+        # Check conditions for two reads
+        # if ((read2 and valid_count1 >= 10 * len(barcodes) and valid_count2 >= 10 * len(barcodes)) or (len(seen_reads) >= 10 * len(valid_kmers) and len(valid_kmers) != 0)):
+        if(len(valid_reads1) >= len(barcodes) and len(valid_reads2) >= len(barcodes) and \
+           (valid_count1 >= 10 * len(barcodes) and valid_count2 >= 10 * len(barcodes)) or (len(seen_reads) >= 10 * len(valid_kmers) and len(valid_kmers) != 0)):
+            # Break if there's a single dominant offset or the most common is 5 times more frequent than the second
+            # print("TRUE", file=sys.stderr)
+            if (len(read1_offsets_common) == 1 and len(read2_offsets_common) == 1) or \
+            (len(read1_offsets_common) > 1 and len(read2_offsets_common) > 1 and
+                read1_offsets_common[0][1] >= 2 * read1_offsets_common[1][1] and
+                read2_offsets_common[0][1] >= 2 * read2_offsets_common[1][1]):
+                break
+
+        # Check conditions for a single read
+        # elif (not read2 and valid_count1 >= 250 * len(barcodes) or (len(seen_reads) >= 10 * len(valid_kmers) and len(valid_kmers) != 0)):
+        elif((not read2 and len(valid_reads1) >= len(barcodes)) and \
+             (valid_count1 >= 10 * len(barcodes) or (len(seen_reads) >= 10 * len(valid_kmers) and len(valid_kmers) != 0))):
+            # Break if there's a single dominant offset or the most common is 5 times more frequent than the second
+            if len(read1_offsets_common) == 1 or \
+            (len(read1_offsets_common) > 1 and
+                read1_offsets_common[0][1] >= 2 * read1_offsets_common[1][1]):
+                break
             
     read1_orientation = Counter(global_read1_orientations).most_common(1)[0][0] if read1 else None
     read1_offset = Counter(global_read1_offsets).most_common(1)[0][0] if read1 else None
@@ -202,11 +242,11 @@ def sample_data(file1, file2, barcodes, is_paired):
 
     if(read1_orientation == 'forward' or read2_orientation == 'reverse'):
         need_swap = False
-        return(processed_count1 + processed_count2, read1_offset, read2_offset, valid_reads1, valid_reads2, need_swap)
+        return(processed_count1 + processed_count2, read1_offset, read2_offset, valid_reads1, valid_reads2, unique_barcodes, need_swap)
 
     elif(read1_orientation == 'reverse' or read2_orientation == 'forward'):
         need_swap = True
-        return(processed_count1 + processed_count2, read2_offset, read1_offset, valid_reads2, valid_reads1, need_swap)
+        return(processed_count1 + processed_count2, read2_offset, read1_offset, valid_reads2, valid_reads1, unique_barcodes, need_swap)
 
     else: raise ValueError("Unable to determine orientation of reads.")
 
@@ -347,18 +387,16 @@ def main(args):
     # Reading reads Files
     console.log("Sampling initial reads for orientation...")
 
-    # Initialize
-    console.log("Determining orientation of reads...")
-
-    new_reads_sampled, bc_start1, bc_start2, sample1, sample2, need_swap = sample_data(reads1, reads2, barcodes, is_paired)
-
-    console.log(f"Sampled {new_reads_sampled:,} unique reads and found {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse valid matches...")
-    console.log(f"Swapping orientation..." if need_swap else f"Proceeding with reads in orientation provided...")                
-
+    new_reads_sampled, bc_start1, bc_start2, sample1, sample2, unique_barcodes, need_swap = sample_data(reads1, reads2, barcodes, is_paired)
+    # console.log(f"Sampled {new_reads_sampled:,} unique reads. Found {processed_count1:,} valid matches, including {safe_len(sample1):,} unique forward matches and {safe_len(sample2):,} unique reverse matches...")
+    console.log(f"Sampled {new_reads_sampled:,} reads and found {safe_len(unique_barcodes):,} barcodes in {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse matches...")
+    
+    if need_swap: console.log("Swapping orientation...")
+    
+    console.log("Identifying flanking sequences...")
 
     # Find flanking sequences
     if sample1 is not None:
-        console.log("Identifying forward flanking sequences...")
         L_fwd, R_fwd = find_flanks(sample1, bc_start1, bc_len)
         L_fwd_start = bc_start1 - len(L_fwd) if L_fwd else 0
     else:
@@ -366,7 +404,6 @@ def main(args):
         L_fwd_start = None
 
     if sample2 is not None:
-        console.log("Identifying reverse flanking sequences...")
         L_rev, R_rev = find_flanks(sample2, bc_start2, bc_len)
         L_rev_start =  bc_start2 - len(L_rev) if L_rev else 0
     else:
