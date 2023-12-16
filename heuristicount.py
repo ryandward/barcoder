@@ -14,6 +14,7 @@ import zstandard as zstd
 from Bio.Seq import Seq
 from rich.console import Console
 from rich.table import Table
+from Bio import SeqIO
 
 
 def rev_comp(sequence: str) -> str:
@@ -37,18 +38,36 @@ def read_fasta(fasta_file) -> Set[str]:
                 barcodes.add(line.strip())
     return barcodes
 
+def validate_barcodes(barcodes):
+    # If the input is a string, treat it as a filename
+    if isinstance(barcodes, str):
+        sequences = list(SeqIO.parse(barcodes, "fasta"))
+    # If the input is a list, treat it as a list of sequences
+    elif isinstance(barcodes, list):
+        sequences = barcodes
+    else:
+        raise ValueError("The input should be a filename or a list of barcodes.")
+
+    # Check if there are at least 10 sequences
+    if len(sequences) < 10:
+        raise ValueError("The input contains fewer than 10 sequences. Please provide at least 10 short barcodes.")
+    
+    # Check if the sequences are short (e.g., no more than 1,000 bases)
+    for seq in sequences:
+        if len(seq) > 1000:
+            raise ValueError(f"The sequence \"{seq.id}\" is longer than 1,000 bases. Provide a list or fasta file of short barcodes.")
 
 def open_reads_file(file_path, mode):
     if file_path.endswith('.gz'):
         return gzip.open(file_path, mode)
     elif file_path.endswith('.zst'):
         return zstd.open(file_path, mode)
-    elif file_path.endswith('.fastq'):
+    elif file_path.endswith('.fastq') or file_path.endswith('.fq'):
         return open(file_path, mode)
     elif file_path.endswith('.reads'):
         return open(file_path, mode)
     else:
-        raise ValueError("Unsupported file type.")
+        raise ValueError(f"\"{file_path}\" does not appear to be a supported reads file: .fastq or .reads.")
 
 def read_in_chunks(file1, file2=None, chunk_size=2**16) -> Tuple[List[str], List[str]]:
     reads1, reads2 = [], []
@@ -248,10 +267,10 @@ def sample_data(file1, file2, barcodes, is_paired):
         need_swap = True
         return(processed_count1 + processed_count2, read2_offset, read1_offset, valid_reads2, valid_reads1, unique_barcodes, need_swap)
 
-    else: raise ValueError("Unable to determine orientation of reads.")
+    else: raise ValueError("Unable to determine orientation of reads. Please check the input files.")
 
 
-def find_flanks(reads: List[str], start: int, bc_len: int, max_flank: int = 4) -> Tuple[str, str]:
+def find_flanks(reads: List[str], start: int, bc_len: int, max_flank: int = 10) -> Tuple[str, str]:
     L_flanks, R_flanks = Counter(), Counter()
 
     def update_flanks(side: str, seq: str, max_len: int):
@@ -320,7 +339,7 @@ def process_chunk(chunk, bcs_with_flanks_fwd, bcs_with_flanks_rev, L_fwd_start, 
 
     def process_paired_end(reads1, reads2, L_fwd_start, L_fwd_len, R_fwd_len, L_rev_start, L_rev_len, R_rev_len, L_fwd, R_fwd, L_rev, R_rev):
         if len(reads1) != len(reads2):
-            raise ValueError("Length of reads1 and reads2 should be the same for paired-end data.")
+            raise ValueError("Length of reads1 and reads2 must be the same for paired-end data.")
         
         for record_fwd, record_rev in zip(reads1, reads2):
             if 'N' in record_fwd:
@@ -367,8 +386,10 @@ def process_chunk(chunk, bcs_with_flanks_fwd, bcs_with_flanks_rev, L_fwd_start, 
 
 
 def main(args):
-    console = Console(stderr=True, highlight=True)
-    console.log("[bold red]Initializing heuristic barcode counting[/bold red]...")
+    from rich.style import Style
+    console = Console(stderr = True, highlight = True, style = Style(color = "white"))
+    console_error = Console(stderr = True, highlight = True, style = Style(color = "red", bold = True))
+    console.log("Initializing heuristic barcode counting...")
 
     reads1 = args.file1
     reads2 = args.file2
@@ -376,179 +397,191 @@ def main(args):
     num_threads = cpu_count()//2
 
     # Reading FASTA File
-    console.log("Reading barcodes...")
-    barcodes = read_fasta(args.fasta_file)
-    bcs_rev = {rev_comp(barcode) for barcode in barcodes}
+    console.log("Reading barcodes...", )
     
-    bc_len = len(next(iter(barcodes)))
-
-    is_paired = bool(args.file2)
+    try:
+        validate_barcodes(args.fasta_file)
+        barcodes = read_fasta(args.fasta_file)
+        bcs_rev = {rev_comp(barcode) for barcode in barcodes}
+        bc_len = len(next(iter(barcodes)))
+        is_paired = bool(args.file2)
         
-    # Reading reads Files
-    console.log("Sampling initial reads for orientation...")
+        # Reading reads Files
+        console.log("Sampling initial reads for orientation...")
 
-    new_reads_sampled, bc_start1, bc_start2, sample1, sample2, unique_barcodes, need_swap = sample_data(reads1, reads2, barcodes, is_paired)
-    # console.log(f"Sampled {new_reads_sampled:,} unique reads. Found {processed_count1:,} valid matches, including {safe_len(sample1):,} unique forward matches and {safe_len(sample2):,} unique reverse matches...")
-    console.log(f"Sampled {new_reads_sampled:,} reads and found {safe_len(unique_barcodes):,} barcodes in {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse matches...")
-    
-    if need_swap: console.log("Swapping orientation...")
-    
-    console.log("Identifying flanking sequences...")
-
-    # Find flanking sequences
-    if sample1 is not None:
-        L_fwd, R_fwd = find_flanks(sample1, bc_start1, bc_len)
-        L_fwd_start = bc_start1 - len(L_fwd) if L_fwd else 0
-    else:
-        L_fwd, R_fwd = None, None
-        L_fwd_start = None
-
-    if sample2 is not None:
-        L_rev, R_rev = find_flanks(sample2, bc_start2, bc_len)
-        L_rev_start =  bc_start2 - len(L_rev) if L_rev else 0
-    else:
-        L_rev, R_rev = None, None
-        L_rev_start = None
-
-
-   # Calculate reverse complements
-    L_rev_rev = rev_comp(L_rev) if L_rev else None
-    R_rev_rev = rev_comp(R_rev) if R_rev else None
-
-    # Check if the fwd and reverse flanking sequences are reverse complements
-    L_min_len = R_min_len = 0
-
-    if L_fwd and R_rev_rev:
-        L_min_len = min(len(L_fwd), len(R_rev_rev))
-        if L_fwd[-L_min_len:] != R_rev_rev[:L_min_len]:
-            console.log("[bold red]Error: Forward and reverse L_flank flanking sequences are not reverse complements.[/bold red]")
-            sys.exit(1)
+        new_reads_sampled, bc_start1, bc_start2, sample1, sample2, unique_barcodes, need_swap = sample_data(reads1, reads2, barcodes, is_paired)
+        # console.log(f"Sampled {new_reads_sampled:,} unique reads. Found {processed_count1:,} valid matches, including {safe_len(sample1):,} unique forward matches and {safe_len(sample2):,} unique reverse matches...")
+        console.log(f"Sampled {new_reads_sampled:,} reads and found {safe_len(unique_barcodes):,} barcodes in {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse matches...")
         
-    if R_fwd and L_rev_rev:
-        R_min_len = min(len(R_fwd), len(L_rev_rev))
-        if R_fwd[:R_min_len] != L_rev_rev[:R_min_len]:
-            console.log("[bold red]Error: Forward and reverse R_flank flanking sequences are not reverse complements.[/bold red]")
-            sys.exit(1)
+        if need_swap: console.log("Swapping orientation...")
+        
+        console.log("Identifying flanking sequences...")
 
-    def add_flank(barcodes, L_flank=None, R_flank=None):
-        L_flank, R_flank = (L_flank or ""), (R_flank or "")
-        return {L_flank + barcode + R_flank for barcode in barcodes}
+        # Find flanking sequences
+        if sample1 is not None:
+            L_fwd, R_fwd = find_flanks(sample1, bc_start1, bc_len)
+            L_fwd_start = bc_start1 - len(L_fwd) if L_fwd else 0
+        else:
+            L_fwd, R_fwd = None, None
+            L_fwd_start = None
+
+        if sample2 is not None:
+            L_rev, R_rev = find_flanks(sample2, bc_start2, bc_len)
+            L_rev_start =  bc_start2 - len(L_rev) if L_rev else 0
+        else:
+            L_rev, R_rev = None, None
+            L_rev_start = None
+
+
+    # Calculate reverse complements
+        L_rev_rev = rev_comp(L_rev) if L_rev else None
+        R_rev_rev = rev_comp(R_rev) if R_rev else None
+
+        # Check if the fwd and reverse flanking sequences are reverse complements
+        L_min_len = R_min_len = 0
+
+        if L_fwd and R_rev_rev:
+            L_min_len = min(len(L_fwd), len(R_rev_rev))
+            if L_fwd[-L_min_len:] != R_rev_rev[:L_min_len]:
+                raise ValueError(f"Forward and reverse left flanking sequences ({L_fwd} and {R_rev_rev}) do not contain substrings that are reverse complements.")
+
+        if R_fwd and L_rev_rev:
+            R_min_len = min(len(R_fwd), len(L_rev_rev))
+            if R_fwd[:R_min_len] != L_rev_rev[:R_min_len]:
+                raise ValueError(f"Forward and reverse right flanking sequences ({R_fwd} and {L_rev_rev}) do not contain substrings that are reverse complements.")
+                
+        def add_flank(barcodes, L_flank=None, R_flank=None):
+            L_flank, R_flank = (L_flank or ""), (R_flank or "")
+            return {L_flank + barcode + R_flank for barcode in barcodes}
+        
+        # Add flanks to the ends of the barcodes, if present
+
+        bcs_with_flanks_fwd = add_flank(barcodes, L_fwd, R_fwd)
+        bcs_with_flanks_rev = add_flank(bcs_rev, L_rev, R_rev)
+
+        console.log("Executing high-throughput read analysis...")
+        chunk_generator = read_in_chunks(args.file1, args.file2 if is_paired else None)
+
+        # Create argument generator
+        args_generator = ((chunk, bcs_with_flanks_fwd, bcs_with_flanks_rev, L_fwd_start, L_rev_start, bc_len, L_fwd, R_fwd, L_rev, R_rev, need_swap) for chunk in chunk_generator)
+
+        # Execute multiprocessing
+        with Pool(num_threads) as pool:
+            results = pool.starmap(process_chunk, args_generator)
+        # Collating Results
+        console.log("Finishing up and collating results!")
+        
+        doc_bcs = Counter()
+        undoc_bcs = Counter()
+
+        total_reads = 0
+
+        for result, chunk_size in results:
+            total_reads += chunk_size
+            for barcode, count in result.items():
+                if barcode.endswith('*'):
+                    undoc_bcs[barcode] += count
+                else:
+                    doc_bcs[barcode] += count
+
+        if is_paired:
+            file1_filename = os.path.basename(args.file1) if not need_swap else os.path.basename(args.file2)
+            file2_filename = os.path.basename(args.file2) if not need_swap else os.path.basename(args.file1)
+        else:
+            file1_filename = os.path.basename(args.file1) if not need_swap else None
+            file2_filename = None if not need_swap else os.path.basename(args.file1)
+
+        # Table
+
+        # Create a single table with enhanced styles
+        combined_table = Table(
+            # title="Summary",
+            box=rich.table.box.SIMPLE_HEAVY,
+            caption="Finished at [u]{}[/u]".format(datetime.now()),
+            title_style="bold bright_white",
+            caption_style="white",
+            header_style="bold bright_white",
+            border_style="bold bright_white",
+            highlight=True,
+            show_header=True
+        )
+        # Define columns with justifications
+        combined_table.add_column(os.path.basename(sys.argv[0]), justify="right", style="white", min_width=30)
+        combined_table.add_column("Summary", justify="right", min_width=20)
+
+        # Input & Configuration Sub-heading
+        combined_table.add_section()
+        combined_table.add_row("[bold bright_magenta]Input & Config[/bold bright_magenta]", "")
+
+        if args.fasta_file: combined_table.add_row("Barcodes", f"[bold]{os.path.basename(args.fasta_file)}[/bold]")
+        if file1_filename: combined_table.add_row("Forward Reads", f"[bold]{file1_filename}[/bold]")
+        if file2_filename: combined_table.add_row("Reverse Reads", f"[bold]{file2_filename}[/bold]")
+        if num_threads: combined_table.add_row("Threads", f"[bold]{num_threads}[/bold]")
+        if platform.system: combined_table.add_row("Operating System", f"[bold]{platform.system()}[/bold]")
+
+        # Heuristic Statistics Sub-heading
+        combined_table.add_section()
+        combined_table.add_row("[bold][bright_blue]Heuristics[/bright_blue][/bold]", "")
+
+        if bc_len: combined_table.add_row("Barcode Length", f"[bold]{bc_len}[/bold]")
+        if bc_start1:combined_table.add_row("Forward Offset", f"[bold]{bc_start1}[/bold]")
+        if bc_start2:combined_table.add_row("Reverse Offset", f"[bold]{bc_start2}[/bold]")
+        if L_fwd or R_fwd: combined_table.add_row("Forward Flanks", f"[bold]{L_fwd}...{R_fwd}[/bold]")
+        if L_rev or R_rev: combined_table.add_row("Reverse Flanks", f"[bold]{L_rev}...{R_rev}[/bold]")
+
+        # Numeric Statistics Sub-heading
+        combined_table.add_section()
+        # combined_table.add_row("[bold][bright_green]Barcode Alignment Stats[/bright_green][/bold]", "")
+        combined_table.add_row("[bold]Total Reads[/bold]", f"[bold]{total_reads:,}[/bold]")
+        combined_table.add_row("Documented Barcode Reads", f"[bold]{sum(doc_bcs.values()):,}[/bold]")
+        combined_table.add_row("Undocumented Barcode Reads", f"[bold]{sum(undoc_bcs.values()):,}[/bold]")
+        combined_table.add_section()
+        combined_table.add_row("[bold]Documented Barcodes[/bold]", f"{len(barcodes):,}")
+        combined_table.add_row("Seen Documented Barcodes", f"[bold]{len(doc_bcs):,}[/bold]")
+        combined_table.add_row("Unseen Documented Barcodes", f"[bold]{(len(barcodes) - len(doc_bcs)):,}[/bold]")
+        combined_table.add_section()
+        combined_table.add_row("[bold]Uncocumented Barcodes[/bold]", f"{len(undoc_bcs):,}")
+        combined_table.add_section()
+        combined_table.add_row("[bold]Barcoded Reads Fraction[/bold]", f"[bold]{((sum(doc_bcs.values()) + sum(undoc_bcs.values())) / total_reads if total_reads != 0 else 0):.3f}[/bold]")
+        combined_table.add_row("Documented Fraction", f"[bold]{(sum(doc_bcs.values()) / total_reads if total_reads != 0 else 0):.3f}[/bold]")
+        combined_table.add_row("Undocumented Fraction", f"[bold]{(sum(undoc_bcs.values()) / total_reads if total_reads != 0 else 0):.3f}[/bold]", end_section=True)
+
+        # Sequence Information Sub-heading  
+        combined_table.add_section()
+        top_doc_bcs = min(5, len(doc_bcs))
+        combined_table.add_row(f"[bold bright_green]Top {top_doc_bcs} Documented Barcodes[/bold bright_green]", "")
+        for idx, (barcode, count) in enumerate(doc_bcs.most_common(top_doc_bcs)):
+            end_section = idx == (top_doc_bcs - 1)
+            combined_table.add_row(barcode, f"{count:,}", end_section=end_section)
+
+        combined_table.add_section()
+        top_undoc_bcs = min(5, len(undoc_bcs))
+        combined_table.add_row(f"[bold bright_red]Top {top_undoc_bcs} Undocumented Barcodes[/bold bright_red]", f"")
+        # combined_table.add_row("[bold]Found Undocumented Barcodes[bold]", f"[bold]{len(undoc_bcs):,}[/bold]")
+        for idx, (barcode, count) in enumerate(undoc_bcs.most_common(top_undoc_bcs)):
+            end_section = idx == (top_undoc_bcs - 1)
+            combined_table.add_row(barcode, f"{count:,}", end_section=end_section)
+
+        # Print the combined table
+        console.log(combined_table)
+
+        for barcode, count in doc_bcs.items():
+            print("\t".join([barcode, str(count)]))
+
+        for barcode, count in undoc_bcs.items():
+            print("\t".join([barcode, str(count)]))
     
-    # Add flanks to the ends of the barcodes, if present
-
-    bcs_with_flanks_fwd = add_flank(barcodes, L_fwd, R_fwd)
-    bcs_with_flanks_rev = add_flank(bcs_rev, L_rev, R_rev)
-
-    console.log("Executing high-throughput read analysis...")
-    chunk_generator = read_in_chunks(args.file1, args.file2 if is_paired else None)
-
-    # Create argument generator
-    args_generator = ((chunk, bcs_with_flanks_fwd, bcs_with_flanks_rev, L_fwd_start, L_rev_start, bc_len, L_fwd, R_fwd, L_rev, R_rev, need_swap) for chunk in chunk_generator)
-
-    # Execute multiprocessing
-    with Pool(num_threads) as pool:
-        results = pool.starmap(process_chunk, args_generator)
-    # Collating Results
-    console.log("[bold red]Collating results[/bold red]...")
+    except ValueError as ve:
+        console_error.log(str(ve))
+        console.log(parser.format_help())
     
-    doc_bcs = Counter()
-    undoc_bcs = Counter()
-
-    total_reads = 0
-
-    for result, chunk_size in results:
-        total_reads += chunk_size
-        for barcode, count in result.items():
-            if barcode.endswith('*'):
-                undoc_bcs[barcode] += count
-            else:
-                doc_bcs[barcode] += count
-
-    if is_paired:
-        file1_filename = os.path.basename(args.file1) if not need_swap else os.path.basename(args.file2)
-        file2_filename = os.path.basename(args.file2) if not need_swap else os.path.basename(args.file1)
-    else:
-        file1_filename = os.path.basename(args.file1) if not need_swap else None
-        file2_filename = None if not need_swap else os.path.basename(args.file1)
-
-    # Table
-
-    # Create a single table with enhanced styles
-    combined_table = Table(
-        # title="Summary",
-        box=rich.table.box.SIMPLE_HEAVY,
-        caption="Finished at [u]{}[/u]".format(datetime.now()),
-        title_style="bold bright_white",
-        caption_style="bold white",
-        header_style="bold bright_white",
-        border_style="bold bright_white",
-        show_header=True
-    )
-    # Define columns with justifications
-    combined_table.add_column(os.path.basename(sys.argv[0]), justify="right", style="white", min_width=30)
-    combined_table.add_column("Summary", justify="right", style="bold bright_white", min_width=20)
-
-    # Input & Configuration Sub-heading
-    combined_table.add_section()
-    combined_table.add_row("[bold bright_magenta]Input & Config[/bold bright_magenta]", "")
-
-    if args.fasta_file: combined_table.add_row("Barcodes", f"[bold]{os.path.basename(args.fasta_file)}[/bold]")
-    if file1_filename: combined_table.add_row("Forward Reads", f"[bold]{file1_filename}[/bold]")
-    if file2_filename: combined_table.add_row("Reverse Reads", f"[bold]{file2_filename}[/bold]")
-    if num_threads: combined_table.add_row("Threads", f"[bold]{num_threads}[/bold]")
-    if platform.system: combined_table.add_row("Operating System", f"[bold]{platform.system()}[/bold]")
-
-    # Heuristic Statistics Sub-heading
-    combined_table.add_section()
-    combined_table.add_row("[bold bright_blue]Heuristics[/bold bright_blue]", "")
-
-    if bc_len: combined_table.add_row("Barcode Length", f"[bold]{bc_len}[/bold]")
-    if bc_start1:combined_table.add_row("Forward Offset", f"[bold]{bc_start1}[/bold]")
-    if bc_start2:combined_table.add_row("Reverse Offset", f"[bold]{bc_start2}[/bold]")
-    if L_fwd or R_fwd: combined_table.add_row("Forward Flanks", f"[bold]{L_fwd}...{R_fwd}[/bold]")
-    if L_rev or R_rev: combined_table.add_row("Reverse Flanks", f"[bold]{L_rev}...{R_rev}[/bold]")
-
-    # Numeric Statistics Sub-heading
-    combined_table.add_section()
-    combined_table.add_row("[bold bright_green]Barcode Alignment Stats[/bold bright_green]", "")
-
-    combined_table.add_row("Declared Barcodes", f"[bold]{len(barcodes):,}[/bold]")
-    combined_table.add_row("Seen Documented Barcodes", f"[bold]{len(doc_bcs):,}[/bold]")
-    combined_table.add_row("Unseen Documented Barcodes", f"[bold]{(len(barcodes) - len(doc_bcs)):,}[/bold]")
-    combined_table.add_row("Found Undocumented Barcodes", f"[bold]{len(undoc_bcs):,}[/bold]")
-    combined_table.add_row("Total Reads", f"[bold]{total_reads:,}[/bold]")
-    combined_table.add_row("Documented Barcode Reads", f"[bold]{sum(doc_bcs.values()):,}[/bold]")
-    combined_table.add_row("Undocumented Barcode Reads", f"[bold]{sum(undoc_bcs.values()):,}[/bold]")
-    combined_table.add_row("Documented Fraction", f"[bold]{(sum(doc_bcs.values()) / total_reads if total_reads != 0 else 0):.3f}[/bold]")
-    combined_table.add_row("Undocumented Fraction", f"[bold]{(sum(undoc_bcs.values()) / total_reads if total_reads != 0 else 0):.3f}[/bold]", end_section=True)
-
-    # Sequence Information Sub-heading  
-    combined_table.add_section()
-    top_doc_bcs = min(5, len(doc_bcs))
-    combined_table.add_row(f"[bold bright_yellow]Top {top_doc_bcs} Documented Barcodes[/bold bright_yellow]", "")
-    for idx, (barcode, count) in enumerate(doc_bcs.most_common(top_doc_bcs)):
-        end_section = idx == (top_doc_bcs - 1)
-        combined_table.add_row(barcode, f"{count:,}", end_section=end_section)
-
-    combined_table.add_section()
-    top_undoc_bcs = min(5, len(undoc_bcs))
-    combined_table.add_row(f"[bold bright_red]Top {top_undoc_bcs} Undocumented Barcodes[/bold bright_red]", "")
-    for idx, (barcode, count) in enumerate(undoc_bcs.most_common(top_undoc_bcs)):
-        end_section = idx == (top_undoc_bcs - 1)
-        combined_table.add_row(barcode, f"{count:,}", end_section=end_section)
-
-    # Print the combined table
-    console.log(combined_table)
-
-    for barcode, count in doc_bcs.items():
-        print("\t".join([barcode, str(count)]))
-
-    for barcode, count in undoc_bcs.items():
-        print("\t".join([barcode, str(count)]))
+    except Exception as e:
+        console_error.log(f"An unexpected error occurred: {str(e)}")
+        console.log(parser.format_help())
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process Barcodes.')
-    parser.add_argument('fasta_file', type=str, help='Input FASTA file.')
+    parser.add_argument('fasta_file', type=str, help='List or FASTA file containing barcodes.')
     parser.add_argument('file1', type=str, help='First reads file: FASTQ or raw reads.')
     parser.add_argument('file2', type=str, nargs='?', default=None, help='Second reads file: FASTQ or raw reads (optional).')
     args = parser.parse_args()
