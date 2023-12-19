@@ -70,7 +70,7 @@ def run_bowtie(sgrna_fastq_file_name, topological_fasta_file_name, sam_file_name
             stderr=devnull,
         )
         subprocess.run(
-            ["bowtie", "--all", "--nomaqround", "-p", str(num_threads), "--tryhard", "-v", str(num_mismatches), "-S", index_prefix, sgrna_fastq_file_name, sam_file_name],
+            ["bowtie", "-k 100", "--nomaqround", "-p", str(num_threads), "--tryhard", "-v", str(num_mismatches), "-S", "-x", index_prefix, sgrna_fastq_file_name, sam_file_name],
             stdout=devnull,
             stderr=devnull,
         )
@@ -236,9 +236,12 @@ def hash_row(row_data):
 def pam_matches(pam_pattern, extracted_pam):
     # Convert N to . for regex matching
     regex_pattern = pam_pattern.replace('N', '.')
+    if extracted_pam is None:
+        return False
     return bool(re.match(regex_pattern, extracted_pam))
 
-def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_file_name, pam):
+def parse_sam_output(params):
+    sam_file_name, locus_map, topological_fasta_file_name, gb_file_name, pam = params
 
     unique_rows = {}
     true_chrom_lengths = get_true_chrom_lengths(gb_file_name)
@@ -415,9 +418,18 @@ def main(args):
     topological_fasta_file_name = os.path.join(
         working_dir, os.path.splitext(os.path.basename(args.genome_file))[0] + ".fasta")
     
-    sgrna_fastq_file_name = os.path.join(
-        working_dir, os.path.splitext(os.path.basename(args.sgrna_file ))[0] + ".fastq")
-    
+    base_name = os.path.basename(args.sgrna_file)
+    if '.fastq' in base_name:
+        sgrna_fastq_file_name = args.sgrna_file
+    elif base_name.endswith('.fasta') or base_name.endswith('.fasta.gz'):
+        ext = '.fasta.gz' if base_name.endswith('.fasta.gz') else '.fasta'
+        base_name = base_name[:-len(ext)]
+        sgrna_fastq_file_name = os.path.join(working_dir, base_name + ".fastq")
+        create_fake_topological_fastq(args.sgrna_file, sgrna_fastq_file_name)
+    else:
+        console.log(f"[bold red]File extension not recognized. [/bold red]")
+        sys.exit(1)
+
     output_folder = "results"
 
     sam_file_name = os.path.join(output_folder,
@@ -436,7 +448,17 @@ def main(args):
         os.remove(fai_file)
 
     console.log("Annotating regions to identify...")
-    create_fake_topological_fastq(args.sgrna_file, sgrna_fastq_file_name)
+
+    # base_name, ext = os.path.splitext(os.path.basename(args.sgrna_file))
+    # if ext in ['.fastq', '.fastq.gz']:
+    #     sgrna_fastq_file_name = args.sgrna_file
+    # elif ext in ['.fasta', '.fasta.gz']:
+    #     sgrna_fastq_file_name = os.path.join(working_dir, base_name + ".fastq")
+    #     create_fake_topological_fastq(args.sgrna_file, sgrna_fastq_file_name)
+    # else:
+    #     console.log(f"[bold red]File extension {ext} not recognized. [/bold red]")
+    #     sys.exit(1)
+
     if not os.path.exists(topological_fasta_file_name):
         console.log(f"[bold red]Unable to create topological map of the genome. [/bold red]")
         sys.exit(1)
@@ -446,18 +468,30 @@ def main(args):
 
     with pysam.FastaFile(topological_fasta_file_name) as _:
         pass
+    
+    from multiprocessing import Pool
 
     try:
-        console.log("Finding matches...")    
-        results = parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, args.genome_file, args.pam)
-        results = pd.DataFrame.from_dict(results, orient='index')
-        # column_order = ['name', 'spacer', 'pam', 'chr', 'locus_tag', 'target', 'type', 'mismatches', 'diff', 'coords', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note']
+        console.log("Finding matches...")
+        params = [(sam_file_name, locus_map, topological_fasta_file_name, args.genome_file, args.pam)]
+        with Pool() as p:
+            results = p.starmap(parse_sam_output, params)
+        results = pd.DataFrame.from_records(results)
+
         column_order = ['name', 'spacer', 'pam', 'chr', 'locus_tag', 'target', 'mismatches', 'coords', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note']
 
+        # Ensure all columns in column_order exist in the DataFrame, fill with None if absent
+        for column in column_order:
+            if column not in results.columns:
+                results[column] = None
+
+        # Reorder the DataFrame columns according to column_order
         results = results[column_order]
+
         integer_cols = ['mismatches', 'offset', 'overlap']
         
         results[integer_cols] = results[integer_cols].astype('Int64')
+
 
     except FileNotFoundError:
         console.log(f"[bold red]Trouble with Bowtie aligner. User a lower number of mismatches.[/bold red]")
@@ -472,7 +506,8 @@ def main(args):
     # Delete fastq file, fasta file, and sam file, since they are no longer needed
     os.remove(sam_file_name)
     os.remove(topological_fasta_file_name)
-    os.remove(sgrna_fastq_file_name)
+    if sgrna_fastq_file_name != args.sgrna_file:
+        os.remove(sgrna_fastq_file_name)
     os.remove(topological_fasta_file_name + ".fai")
 
     # Delete working directory, if it is empty
