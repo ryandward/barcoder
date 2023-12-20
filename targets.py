@@ -363,7 +363,7 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
     # Update notes based on the number of unique coordinates and ambiguous annotations
     for spacer, coords in coords_by_spacer.items():
         rows = rows_by_spacer[spacer]
-        targets = [row for row in rows if row['target'] is not None]
+        targets = {row['target'] for row in rows if row['target'] is not None}
         if not targets:
             continue
         if spacer not in note:
@@ -383,20 +383,20 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
             note[spacer].append(f"{len(intergenic_annotations)} intergenic")
 
     # Check if target spans the origin of replication
-    for row_data in unique_rows.values():
-        target = row_data['target']
-        if target is None:
-            continue
+    # for row_data in unique_rows.values():
+    #     target = row_data['target']
+    #     if target is None:
+    #         continue
 
-        spacer = row_data['spacer']
-        tar_start = row_data['tar_start']
-        tar_end = row_data['tar_end']
-        chrom = row_data['chr']
+    #     spacer = row_data['spacer']
+    #     tar_start = row_data['tar_start']
+    #     tar_end = row_data['tar_end']
+    #     chrom = row_data['chr']
 
-        if tar_start % true_chrom_lengths.get(chrom, None) > tar_end % true_chrom_lengths.get(chrom, None):
-            if spacer not in note:
-                note[spacer] = []
-            note[spacer].append("spans origin")
+    #     if tar_start % true_chrom_lengths.get(chrom, None) > tar_end % true_chrom_lengths.get(chrom, None):
+    #         if spacer not in note:
+    #             note[spacer] = []
+    #         note[spacer].append("spans origin")
    
     # Join the notes and add them to the corresponding rows in unique_rows
     for row_data in unique_rows.values():
