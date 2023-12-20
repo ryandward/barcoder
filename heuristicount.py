@@ -14,6 +14,7 @@ import zstandard as zstd
 from Bio.Seq import Seq
 from rich.console import Console
 from rich.table import Table
+import rich.table
 from Bio import SeqIO
 
 
