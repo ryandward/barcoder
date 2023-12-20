@@ -11,13 +11,14 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from multiprocessing import cpu_count
 
-import pandas as pd
-import pysam
-import rich
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqFeature import CompoundLocation
 from Bio.SeqRecord import SeqRecord
+import pandas as pd
+import pysam
+import rich
+import rich.table
 from rich.console import Console
 from rich.table import Table
 
@@ -253,11 +254,14 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                 pam, read.reference_start, read.reference_end, read.reference_name, topological_fasta_file_name, 
                 "F" if not read.is_reverse else "R", true_chrom_lengths, topological_chrom_lengths)
             
+            if read.query_sequence is None:
+                continue
+
             row_data = {
                 'name': read.query_name,
                 'spacer': read.query_sequence if not read.is_reverse else str(Seq(read.query_sequence).reverse_complement()),
                 'len': len(read.query_sequence),
-           }
+           }    
 
             if not read.is_unmapped:
                 # exclude reads that don't match the PAM
@@ -288,7 +292,7 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                 unique_rows[hash_row(row_data)] = row_data
                 continue
             
-            if not read.is_unmapped:
+            if not read.is_unmapped and read.reference_start is not None and read.reference_end is not None:
                 row_data.update({
                     'target': read.get_reference_sequence() if not read.is_reverse else str(Seq(read.get_reference_sequence()).reverse_complement()),
                     'mismatches': read.get_tag('NM'),
