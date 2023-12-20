@@ -345,58 +345,53 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
 
     note = {}
 
-    # Create a dictionary to store unique coordinates for each name
-    coords_by_spacer = {}
+    # Create a dictionary to store unique genomic sites for each name
+    sites_by_spacer = {}
     for row in unique_rows.values():
         spacer = row['spacer']
         coords = row['coords']
-        if spacer not in coords_by_spacer:
-            coords_by_spacer[spacer] = []
-        coords_by_spacer[spacer].append(coords)
-
+        chr = row['chr']
+        if coords is None or chr is None:
+            continue
+        if spacer not in sites_by_spacer:
+            sites_by_spacer[spacer] = set()
+        sites_by_spacer[spacer].add((coords, chr))
 
     # Group rows by spacer
     rows_by_spacer = defaultdict(list)
-    for row_data in unique_rows.values():
-        rows_by_spacer[row_data['spacer']].append(row_data)
+    for row in unique_rows.values():
+        rows_by_spacer[row['spacer']].append(row)
 
-    # Update notes based on the number of unique coordinates and ambiguous annotations
-    for spacer, coords in coords_by_spacer.items():
-        rows = rows_by_spacer[spacer]
-        targets = {row['target'] for row in rows if row['target'] is not None}
-        if not targets:
+    # Update notes based on the number of unique genomic sites and ambiguous annotations
+    for spacer, rows in rows_by_spacer.items():
+        sites_set = sites_by_spacer.get(spacer, set())
+        if not sites_set:
+            note[spacer] = ["non-targeting"]
             continue
-        if spacer not in note:
-            note[spacer] = []
-        note[spacer].append(f"{len(targets)} {'target' if len(targets) == 1 else 'targets'}")
+        note[spacer] = [f"{len(sites_set)} {'site' if len(sites_set) == 1 else 'sites'}"]
 
-        annotations = rows
-        gene_annotations = [row for row in annotations if row['locus_tag'] is not None]
-        intergenic_annotations = [row for row in annotations if row['locus_tag'] is None and row['target'] is not None]
-        if gene_annotations:
-            if spacer not in note:
-                note[spacer] = []
-            note[spacer].append(f"{len(gene_annotations)} {'gene' if len(gene_annotations) == 1 else 'genes'}")
-        if intergenic_annotations:
-            if spacer not in note:
-                note[spacer] = []
-            note[spacer].append(f"{len(intergenic_annotations)} intergenic")
+        gene_rows = [row for row in rows if row['locus_tag'] is not None]
+        intergenic_rows = [row for row in rows if row['locus_tag'] is None and row['target'] is not None]
+        if gene_rows:
+            note[spacer].append(f"{len(gene_rows)} {'gene' if len(gene_rows) == 1 else 'genes'}")
+        if intergenic_rows:
+            note[spacer].append(f"{len(intergenic_rows)} intergenic")
 
     # Check if target spans the origin of replication
-    # for row_data in unique_rows.values():
-    #     target = row_data['target']
-    #     if target is None:
-    #         continue
+    for row_data in unique_rows.values():
+        target = row_data['target']
+        if target is None:
+            continue
 
-    #     spacer = row_data['spacer']
-    #     tar_start = row_data['tar_start']
-    #     tar_end = row_data['tar_end']
-    #     chrom = row_data['chr']
+        spacer = row_data['spacer']
+        tar_start = row_data['tar_start']
+        tar_end = row_data['tar_end']
+        chrom = row_data['chr']
 
-    #     if tar_start % true_chrom_lengths.get(chrom, None) > tar_end % true_chrom_lengths.get(chrom, None):
-    #         if spacer not in note:
-    #             note[spacer] = []
-    #         note[spacer].append("spans origin")
+        if tar_start % true_chrom_lengths.get(chrom, None) > tar_end % true_chrom_lengths.get(chrom, None):
+            if spacer not in note:
+                note[spacer] = []
+            note[spacer].append("spans origin")
    
     # Join the notes and add them to the corresponding rows in unique_rows
     for row_data in unique_rows.values():
