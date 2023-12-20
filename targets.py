@@ -240,8 +240,7 @@ def pam_matches(pam_pattern, extracted_pam):
         return False
     return bool(re.match(regex_pattern, extracted_pam))
 
-def parse_sam_output(params):
-    sam_file_name, locus_map, topological_fasta_file_name, gb_file_name, pam = params
+def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_file_name, pam):
 
     unique_rows = {}
     true_chrom_lengths = get_true_chrom_lengths(gb_file_name)
@@ -351,33 +350,33 @@ def parse_sam_output(params):
             coords_by_spacer[spacer] = []
         coords_by_spacer[spacer].append(coords)
 
+
+    # Group rows by spacer
+    rows_by_spacer = defaultdict(list)
+    for row_data in unique_rows.values():
+        rows_by_spacer[row_data['spacer']].append(row_data)
+
     # Update notes based on the number of unique coordinates and ambiguous annotations
     for spacer, coords in coords_by_spacer.items():
-        unique_coords = set(coords)
-        if len(unique_coords) > 1:
-            if spacer not in note:
-                note[spacer] = []
-            note[spacer].append(f"{len(unique_coords)} targets")
-        
-        # Add note for ambiguous annotations
-        for coord in unique_coords:
-            count = coords.count(coord)
-            if count > 1:
-                if spacer not in note:
-                    note[spacer] = []
-                note[spacer].append(f"{count} annotations")
-
-    # Check if the target is None, and if so, add a note
-    for row_data in unique_rows.values():
-        target = row_data['target']
-        if target is None:
+        rows = rows_by_spacer[spacer]
+        targets = [row for row in rows if row['target'] is not None]
+        if not targets:
             continue
-        spacer = row_data['spacer']
-        locus_tag = row_data['locus_tag']
-        if locus_tag is None:
+        if spacer not in note:
+            note[spacer] = []
+        note[spacer].append(f"{len(targets)} {'target' if len(targets) == 1 else 'targets'}")
+
+        annotations = rows
+        gene_annotations = [row for row in annotations if row['locus_tag'] is not None]
+        intergenic_annotations = [row for row in annotations if row['locus_tag'] is None and row['target'] is not None]
+        if gene_annotations:
             if spacer not in note:
                 note[spacer] = []
-            note[spacer].append("intergenic")
+            note[spacer].append(f"{len(gene_annotations)} {'gene' if len(gene_annotations) == 1 else 'genes'}")
+        if intergenic_annotations:
+            if spacer not in note:
+                note[spacer] = []
+            note[spacer].append(f"{len(intergenic_annotations)} intergenic")
 
     # Check if target spans the origin of replication
     for row_data in unique_rows.values():
@@ -417,6 +416,8 @@ def main(args):
     
     topological_fasta_file_name = os.path.join(
         working_dir, os.path.splitext(os.path.basename(args.genome_file))[0] + ".fasta")
+
+    console.log("Annotating regions to identify...")
     
     base_name = os.path.basename(args.sgrna_file)
     if '.fastq' in base_name:
@@ -440,28 +441,11 @@ def main(args):
     console.log("Generating topological coordinate maps...")
     locus_map, organisms, seq_lens, topologies = create_locus_map(args.genome_file)
 
-    console.log("Generating topological gene maps...")
     create_topological_fasta(args.genome_file, topological_fasta_file_name)
     # Delete existing .fai file if it exists
     fai_file = topological_fasta_file_name + ".fai"
     if os.path.exists(fai_file):
         os.remove(fai_file)
-
-    console.log("Annotating regions to identify...")
-
-    # base_name, ext = os.path.splitext(os.path.basename(args.sgrna_file))
-    # if ext in ['.fastq', '.fastq.gz']:
-    #     sgrna_fastq_file_name = args.sgrna_file
-    # elif ext in ['.fasta', '.fasta.gz']:
-    #     sgrna_fastq_file_name = os.path.join(working_dir, base_name + ".fastq")
-    #     create_fake_topological_fastq(args.sgrna_file, sgrna_fastq_file_name)
-    # else:
-    #     console.log(f"[bold red]File extension {ext} not recognized. [/bold red]")
-    #     sys.exit(1)
-
-    if not os.path.exists(topological_fasta_file_name):
-        console.log(f"[bold red]Unable to create topological map of the genome. [/bold red]")
-        sys.exit(1)
 
     console.log("Aligning annotations to genome...")
     run_bowtie(sgrna_fastq_file_name, topological_fasta_file_name, sam_file_name, args.mismatches, num_threads)
@@ -472,11 +456,9 @@ def main(args):
     from multiprocessing import Pool
 
     try:
-        console.log("Finding matches...")
-        params = [(sam_file_name, locus_map, topological_fasta_file_name, args.genome_file, args.pam)]
-        with Pool() as p:
-            results = p.starmap(parse_sam_output, params)
-        results = pd.DataFrame.from_records(results)
+        console.log("Finding matches...")    
+        results = parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, args.genome_file, args.pam)
+        results = pd.DataFrame.from_dict(results, orient='index')
 
         column_order = ['name', 'spacer', 'pam', 'chr', 'locus_tag', 'target', 'mismatches', 'coords', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note']
 
