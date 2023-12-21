@@ -1,24 +1,26 @@
 import argparse
 import copy
-import gzip
-import hashlib
-import os
-import platform
-import re
-import subprocess
-import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from multiprocessing import cpu_count
+
+import gzip
+import hashlib
+import os
+import pandas as pd
+import platform
+import pysam
+import re
+import rich
+import rich.table
+import subprocess
+import sys
+import tempfile
 
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqFeature import CompoundLocation
 from Bio.SeqRecord import SeqRecord
-import pandas as pd
-import pysam
-import rich
-import rich.table
 from rich.console import Console
 from rich.table import Table
 
@@ -59,26 +61,6 @@ def create_fake_topological_fastq(topological_fasta_file_name, fastq_file):
             for record in SeqIO.parse(input_handle, "fasta"):
                 record.letter_annotations["phred_quality"] = [40] * len(record)
                 SeqIO.write(record, output_handle, "fastq")
-
-
-def run_bowtie(sgrna_fastq_file_name, topological_fasta_file_name, sam_file_name, num_mismatches, num_threads):
-    index_prefix = "genome_index"
-
-    with open(os.devnull, "w") as devnull:
-        subprocess.run(
-            ["bowtie-build", topological_fasta_file_name, index_prefix],
-            stdout=devnull,
-            stderr=devnull,
-        )
-        subprocess.run(
-            ["bowtie", "-k 100", "--nomaqround", "-p", str(num_threads), "--tryhard", "-v", str(num_mismatches), "-S", "-x", index_prefix, sgrna_fastq_file_name, sam_file_name],
-            stdout=devnull,
-            stderr=devnull,
-        )
-        
-        for file in os.listdir("."):
-            if file.startswith(index_prefix) and file.endswith(".ebwt"):
-                os.remove(file)
 
 
 def create_locus_map(genbank_file_name):
@@ -146,6 +128,7 @@ def reconstruct_target(read):
     reference_seq = read.get_reference_sequence()
     return reference_seq
 
+# Get the real length of chromosomes in the genbank file
 def get_true_chrom_lengths(gb_file):
     chrom_lengths = {}
     with open(gb_file, "r") as f:
@@ -153,6 +136,7 @@ def get_true_chrom_lengths(gb_file):
             chrom_lengths[rec.id] = len(rec.seq)
     return chrom_lengths
 
+# Get length of chromosomes in topological map
 def get_topological_chrom_lengths(fasta_file):
     chrom_lengths = {}
     with open(fasta_file, "r") as f:
@@ -160,31 +144,7 @@ def get_topological_chrom_lengths(fasta_file):
             chrom_lengths[rec.id] = len(rec.seq)
     return chrom_lengths
 
-def extract_pam(pam, tar_start, tar_end, chrom, topological_fasta_file_name, dir, true_chrom_lengths, topological_chrom_lengths):
-    true_chrom_length = true_chrom_lengths.get(chrom, None)
-    topological_chrom_length = topological_chrom_lengths.get(chrom, None)
-
-    if None in (pam, tar_start, tar_end, chrom, topological_fasta_file_name, dir, true_chrom_length, topological_chrom_length):
-        return None
-
-    with pysam.FastaFile(topological_fasta_file_name) as fasta:
-        if dir == 'F':
-            if tar_end + len(pam) > topological_chrom_length:
-                return None
-            pam = fasta.fetch(reference=chrom, start=tar_end, end=tar_end + len(pam)).upper()
-
-        elif dir == 'R':
-            if tar_start - len(pam) < 0:
-                return None
-            pam = fasta.fetch(reference=chrom, start=tar_start - len(pam), end=tar_start).upper()
-            pam = str(Seq(pam).reverse_complement())
-
-        else:
-            return None
-
-    return pam
-
-
+# Get the differences between the spacer and target
 def get_diff(spacer, target):
     differences = []
     
@@ -201,16 +161,16 @@ def get_diff(spacer, target):
     
     return diff_result
 
+# Get the coordinates of the target, accounting for circularity
 def get_coords(tar_start, tar_end, chrom_length):
     start_circular = tar_start % chrom_length
     end_circular = tar_end % chrom_length if tar_end % chrom_length != 0 else chrom_length
 
     if start_circular > end_circular:
         return f"({start_circular}..{chrom_length}, 0..{end_circular})"    
-
     return f"{start_circular}..{end_circular}"
 
-
+# Get the offset of the target from the feature
 def get_offset(target_dir, tar_start, tar_end, feature_start, feature_end):
     if target_dir == "F":
         return tar_start - feature_start
@@ -218,7 +178,8 @@ def get_offset(target_dir, tar_start, tar_end, feature_start, feature_end):
         return feature_end - tar_end
     else:
         return None
-    
+
+# Get the overlap of the target and feature
 def get_overlap(tar_start, tar_end, feature_start, feature_end):
     overlap_start = max(tar_start, feature_start)
     overlap_end = min(tar_end, feature_end)
@@ -229,11 +190,7 @@ def get_overlap(tar_start, tar_end, feature_start, feature_end):
     else:
         return 0
 
-
-def hash_row(rows):
-    canonical_str = "".join([f"{k}:{v}|" for k, v in sorted(rows.items(), key=lambda x: x[0])])
-    return hashlib.md5(canonical_str.encode()).hexdigest()
-
+# Check if the extracted PAM matches the PAM pattern
 def pam_matches(pam_pattern, extracted_pam):
     # Convert N to . for regex matching
     regex_pattern = pam_pattern.replace('N', '.')
@@ -241,18 +198,40 @@ def pam_matches(pam_pattern, extracted_pam):
         return False
     return bool(re.match(regex_pattern, extracted_pam))
 
-def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_file_name, pam):
+# Extract the PAM of the target sequence from the topological map
+def extract_pam(pam, tar_start, tar_end, chrom, fasta, dir, true_chrom_lengths, topological_chrom_lengths):
+    true_chrom_length = true_chrom_lengths.get(chrom, None)
+    topological_chrom_length = topological_chrom_lengths.get(chrom, None)
 
+    if None in (pam, tar_start, tar_end, chrom, fasta, dir, true_chrom_length, topological_chrom_length):
+        return None
+
+    if dir == 'F':
+        if tar_end + len(pam) > topological_chrom_length:
+            return None
+        pam = fasta.fetch(reference=chrom, start=tar_end, end=tar_end + len(pam)).upper()
+
+    elif dir == 'R':
+        if tar_start - len(pam) < 0:
+            return None
+        pam = fasta.fetch(reference=chrom, start=tar_start - len(pam), end=tar_start).upper()
+        pam = str(Seq(pam).reverse_complement())
+
+    else:
+        return None
+
+    return pam
+
+# Parse the SAM file and extract the relevant information
+def parse_sam_output(samfile, locus_map, topological_fasta_file_name, gb_file_name, pam):
     rows_list = []  # Initialize an empty list
     true_chrom_lengths = get_true_chrom_lengths(gb_file_name)
     topological_chrom_lengths = get_topological_chrom_lengths(topological_fasta_file_name)
 
-    with pysam.AlignmentFile(sam_file_name, "r") as samfile:
-        
+    with pysam.FastaFile(topological_fasta_file_name) as fasta:
         for read in samfile.fetch():
-            
             extracted_pam = extract_pam(
-                pam, read.reference_start, read.reference_end, read.reference_name, topological_fasta_file_name, 
+                pam, read.reference_start, read.reference_end, read.reference_name, fasta, 
                 "F" if not read.is_reverse else "R", true_chrom_lengths, topological_chrom_lengths)
             
             if read.query_sequence is None:
@@ -356,10 +335,40 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
     return rows_list
 
 
+# Run bowtie and parse the output using parse_sam_output and temp files
+def run_bowtie_and_parse(sgrna_fastq_file_name, topological_fasta_file_name, locus_map, num_mismatches, num_threads):
+    # Create a temporary directory for the bowtie index files
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Create a temporary name for the genome index
+        genome_index_temp_name = tempfile.NamedTemporaryFile(dir=temp_dir, delete=False).name
+        index_prefix = os.path.join(temp_dir, genome_index_temp_name)
+
+        with open(os.devnull, "w") as devnull:
+            bowtie_build_command = ["bowtie-build", topological_fasta_file_name, index_prefix]
+            bowtie_build_process = subprocess.Popen(bowtie_build_command, stdout=devnull, stderr=devnull)
+            bowtie_build_process.wait()
+
+            # Create a temporary file for the bowtie output
+            with tempfile.NamedTemporaryFile(delete=False) as bowtie_output_temp_file:
+                bowtie_command = ["bowtie", "-k 100", "--nomaqround", "-p", str(num_threads), "--tryhard", "-v", str(num_mismatches), "-S", "-x", index_prefix, sgrna_fastq_file_name]
+                bowtie_process = subprocess.Popen(bowtie_command, stdout=bowtie_output_temp_file, stderr=devnull)
+                bowtie_process.wait()
+
+                with pysam.AlignmentFile(bowtie_output_temp_file.name, "r") as samfile:
+                    results = parse_sam_output(samfile, locus_map, topological_fasta_file_name, args.genome_file, args.pam)
+
+                # Delete the temporary file after we're done with it
+                os.remove(bowtie_output_temp_file.name)
+
+    # Return the results of parse_sam_output
+    return results
+
+# Filter out spacers that don't match the PAM
 def filter_offtargets_by_pam(df):
     targeting_spacers = df[df['target'].notna()]['spacer'].unique()
     return df[~((df['target'].isna()) & (df['spacer'].isin(targeting_spacers)))]
 
+# Create a note for each spacer
 def create_note(row):
     parts = []
     if row['sites'] > 0:
@@ -372,64 +381,58 @@ def create_note(row):
         parts.append("non-targeting")
     return ', '.join(parts)
 
-# def main(sgrna_file, gb_file, num_mismatches):
+# Main function
 def main(args):
     console=Console(file=sys.stderr)
     console.log("[bold red]Initializing barcode target seeker[/bold red]")
 
     num_threads = cpu_count() // 2
 
-    working_dir = create_working_directory()
-    
-    topological_fasta_file_name = os.path.join(
-        working_dir, os.path.splitext(os.path.basename(args.genome_file))[0] + ".fasta")
+    with tempfile.TemporaryDirectory() as working_dir:
+        topological_fasta_file_name = os.path.join(
+            working_dir, os.path.splitext(os.path.basename(args.genome_file))[0] + ".fasta")
 
-    console.log("Annotating regions to identify...")
-    
-    base_name = os.path.basename(args.sgrna_file)
-    if '.fastq' in base_name:
-        sgrna_fastq_file_name = args.sgrna_file
-    elif base_name.endswith('.fasta') or base_name.endswith('.fasta.gz'):
-        ext = '.fasta.gz' if base_name.endswith('.fasta.gz') else '.fasta'
-        base_name = base_name[:-len(ext)]
-        sgrna_fastq_file_name = os.path.join(working_dir, base_name + ".fastq")
-        create_fake_topological_fastq(args.sgrna_file, sgrna_fastq_file_name)
-    else:
-        console.log(f"[bold red]File extension not recognized. [/bold red]")
-        sys.exit(1)
+        console.log("Annotating regions to identify...")
+        
+        base_name = os.path.basename(args.sgrna_file)
+        if '.fastq' in base_name:
+            sgrna_fastq_file_name = args.sgrna_file
+        elif base_name.endswith('.fasta') or base_name.endswith('.fasta.gz'):
+            ext = '.fasta.gz' if base_name.endswith('.fasta.gz') else '.fasta'
+            base_name = base_name[:-len(ext)]
+            sgrna_fastq_file_name = os.path.join(working_dir, base_name + ".fastq")
+            create_fake_topological_fastq(args.sgrna_file, sgrna_fastq_file_name)
+        else:
+            console.log(f"[bold red]File extension not recognized. [/bold red]")
+            sys.exit(1)
 
-    output_folder = "results"
+        console.log("Generating topological coordinate maps...")
+        locus_map, organisms, seq_lens, topologies = create_locus_map(args.genome_file)
 
-    sam_file_name = os.path.join(output_folder,
-        f"{os.path.splitext(os.path.basename(args.sgrna_file))[0]}_{os.path.splitext(os.path.basename(args.genome_file))[0]}.sam")
+        create_topological_fasta(args.genome_file, topological_fasta_file_name)
 
-    os.makedirs(output_folder, exist_ok=True)
+        console.log("Aligning annotations to genome...")
+        results = run_bowtie_and_parse(sgrna_fastq_file_name, topological_fasta_file_name, locus_map, args.mismatches, num_threads)
 
-    console.log("Generating topological coordinate maps...")
-    locus_map, organisms, seq_lens, topologies = create_locus_map(args.genome_file)
-
-    create_topological_fasta(args.genome_file, topological_fasta_file_name)
-    # Delete existing .fai file if it exists
-    fai_file = topological_fasta_file_name + ".fai"
-    if os.path.exists(fai_file):
-        os.remove(fai_file)
-
-    console.log("Aligning annotations to genome...")
-    run_bowtie(sgrna_fastq_file_name, topological_fasta_file_name, sam_file_name, args.mismatches, num_threads)
-
-    with pysam.FastaFile(topological_fasta_file_name) as _:
-        pass
+        with pysam.FastaFile(topological_fasta_file_name) as _:
+            pass
 
     try:
         console.log("Finding matches...")
-
-        results = parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, args.genome_file, args.pam)
 
         # Convert your data to a DataFrame, then drop duplicates, which are caused by overhangs
         results = pd.DataFrame(results).drop_duplicates()
 
         # Use the filter_offtargets_by_pam function
         results = filter_offtargets_by_pam(results)
+        
+        # Create a 'min_tar' column that is the minimum of 'tar_start' and 'tar_end'
+        results['min_tar'] = results[['tar_start', 'tar_end']].min(axis=1)
+
+        # Sort the DataFrame by 'chr', 'min_tar', and 'spacer'
+        results = results.sort_values(by=['chr', 'min_tar', 'spacer'])
+
+        print(results, file=sys.stderr)
 
         # Create a 'site' column only for rows that have a 'target'
         results.loc[results['target'].notnull(), 'site'] = results['chr'].astype(str) + '_' + results['coords'].astype(str)
@@ -455,8 +458,8 @@ def main(args):
         note['note'] = note.apply(create_note, axis=1)
 
         # Merge the 'note' DataFrame with the 'results' DataFrame based on the 'spacer' column
-        results = results.merge(note[['note']], left_on='spacer', right_index=True, how='left')
-
+        results = results.merge(note, left_on='spacer', right_index=True, how='left')
+        
         column_order = ['name', 'spacer', 'pam', 'chr', 'locus_tag', 'target', 'mismatches', 'coords', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note']
 
         # Ensure all columns in column_order exist in the DataFrame, fill with None if absent
@@ -465,11 +468,11 @@ def main(args):
                 results[column] = None
 
         # Reorder the DataFrame columns according to column_order
-        results = results[column_order]
+        final_results = results[column_order]
 
         integer_cols = ['mismatches', 'offset', 'overlap']
         
-        results[integer_cols] = results[integer_cols].astype('Int64')
+        final_results.loc[:, integer_cols] = final_results[integer_cols].astype('Int64')
 
 
     except FileNotFoundError:
@@ -482,18 +485,6 @@ def main(args):
 
     console.log(f"Cleaning up...")
 
-    # Delete fastq file, fasta file, and sam file, since they are no longer needed
-    os.remove(sam_file_name)
-    os.remove(topological_fasta_file_name)
-    if sgrna_fastq_file_name != args.sgrna_file:
-        os.remove(sgrna_fastq_file_name)
-    os.remove(topological_fasta_file_name + ".fai")
-
-    # Delete working directory, if it is empty
-    if not os.listdir(working_dir):
-        os.rmdir(working_dir)
-
-    # Table
 
     # Create a single table with enhanced styles
     combined_table = Table(
@@ -556,15 +547,15 @@ def main(args):
     combined_table.add_section()
     combined_table.add_row("[bold bright_green]Barcode Mapping Stats[/bold bright_green]", "")
 
-    unique_chrs = len(set(x for x in results['chr'] if x is not None))
+    unique_chrs = results['chr'].nunique()
     combined_table.add_row("Chromosomes Targeted", f"[bold]{unique_chrs:,}[/bold]")
 
-    unique_tags = len(set(x for x in results['locus_tag'] if x is not None))
+    unique_tags = results['locus_tag'].nunique()
     combined_table.add_row("Genes Targeted", f"[bold]{unique_tags:,}[/bold]")
 
     # spacers targeting overlapping genes
-    overlapping_spacers = results[results['locus_tag'].isin(ambiguous_locus_tags)]['locus_tag'].nunique()
-    combined_table.add_row("Overlapping Genes Targeted", f"[bold]{overlapping_spacers:,}[/bold]")
+    overlapping_genes_targeted = results.loc[results['genes'] > 1, 'locus_tag'].nunique()
+    combined_table.add_row("Overlapping Genes Targeted", f"[bold]{overlapping_genes_targeted:,}[/bold]")
 
     unique_barcodes = results['spacer'].nunique()
 
@@ -589,7 +580,7 @@ def main(args):
     # Print the combined table
     console.log(combined_table)
 
-    results.to_csv(sys.stdout, sep='\t', index=False, na_rep='None')
+    final_results.to_csv(sys.stdout, sep='\t', index=False, na_rep='None')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Map barcodes to a circular genome")
