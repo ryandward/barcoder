@@ -230,8 +230,8 @@ def get_overlap(tar_start, tar_end, feature_start, feature_end):
         return 0
 
 
-def hash_row(row_data):
-    canonical_str = "".join([f"{k}:{v}|" for k, v in sorted(row_data.items(), key=lambda x: x[0])])
+def hash_row(rows):
+    canonical_str = "".join([f"{k}:{v}|" for k, v in sorted(rows.items(), key=lambda x: x[0])])
     return hashlib.md5(canonical_str.encode()).hexdigest()
 
 def pam_matches(pam_pattern, extracted_pam):
@@ -243,11 +243,12 @@ def pam_matches(pam_pattern, extracted_pam):
 
 def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_file_name, pam):
 
-    unique_rows = {}
+    rows_list = []  # Initialize an empty list
     true_chrom_lengths = get_true_chrom_lengths(gb_file_name)
     topological_chrom_lengths = get_topological_chrom_lengths(topological_fasta_file_name)
 
     with pysam.AlignmentFile(sam_file_name, "r") as samfile:
+        
         for read in samfile.fetch():
             
             extracted_pam = extract_pam(
@@ -257,7 +258,7 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
             if read.query_sequence is None:
                 continue
 
-            row_data = {
+            rows = {
                 'name': read.query_name,
                 'spacer': read.query_sequence if not read.is_reverse else str(Seq(read.query_sequence).reverse_complement()),
                 'len': len(read.query_sequence),
@@ -267,12 +268,13 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                 # exclude reads that don't match the PAM
                 if not pam_matches(pam, extracted_pam):
                     read.is_unmapped = True
+
                 # skip reads where topological map ran out
                 if extracted_pam is None:
                     continue
         
             if read.is_unmapped:
-                row_data.update({
+                rows.update({
                     'type': 'control',
                     'chr': None,
                     'tar_start': None,
@@ -289,120 +291,86 @@ def parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, gb_f
                     'tar_dir': None
                 })
 
-                unique_rows[hash_row(row_data)] = row_data
+                rows_list.append(rows)
                 continue
             
             if not read.is_unmapped and read.reference_start is not None and read.reference_end is not None:
-                row_data.update({
-                    'target': read.get_reference_sequence() if not read.is_reverse else str(Seq(read.get_reference_sequence()).reverse_complement()),
-                    'mismatches': read.get_tag('NM'),
-                    'chr': read.reference_name,
-                    'tar_start': read.reference_start % true_chrom_lengths.get(read.reference_name, None),
-                    'tar_end': read.reference_end % true_chrom_lengths.get(read.reference_name, None),
-                    'sp_dir': "F" if not read.is_reverse else "R",
-                    'pam': extracted_pam,
-                    'coords': get_coords(read.reference_start, read.reference_end, true_chrom_lengths.get(read.reference_name, None))
-                })    
+                
+                try:
+                    target = read.get_reference_sequence() if not read.is_reverse else str(Seq(read.get_reference_sequence()).reverse_complement())
+                    mismatches = int(read.get_tag('NM'))
+                    chr = read.reference_name
+                    tar_start = read.reference_start % true_chrom_lengths.get(chr, None)
+                    tar_end = read.reference_end % true_chrom_lengths.get(chr, None)
+                    sp_dir = "F" if not read.is_reverse else "R"
+                    coords = get_coords(tar_start, tar_end, true_chrom_lengths.get(chr, None))
+                    type = 'mismatch' if mismatches > 0 else 'perfect'
+                    diff = get_diff(rows['spacer'], target)
+                
+                except ValueError as e:
+                    print(e, file=sys.stderr)
+                    sys.exit(1)
 
-                row_data.update({
-                    'type': 'mismatch' if row_data['mismatches'] > 0 else 'perfect',
-                    'diff': get_diff(row_data['spacer'], row_data['target'])
+
+                rows.update({
+                    'target': target,
+                    'mismatches': mismatches,
+                    'chr': chr,
+                    'tar_start': tar_start,
+                    'tar_end': tar_end,
+                    'sp_dir': sp_dir,
+                    'pam': extracted_pam,
+                    'coords': coords,
+                    'type': type,
+                    'diff': diff
                 })
 
-                aligned_genes = {gene_info for pos in range(read.reference_start, read.reference_end)
-                                for gene_info in locus_map.get((row_data['chr'], pos), [])}
+                aligned_genes = {gene_info for pos in range(tar_start, tar_end)
+                                for gene_info in locus_map.get((chr, pos), [])}
 
                 if not aligned_genes:
-                    row_data.update({
+                    rows.update({
                         'locus_tag': None, 
                         'offset': None, 
                         'overlap': None,
                         'tar_dir': None
                     })
-                    unique_rows[hash_row(row_data)] = row_data                
-                    continue
-                
-                for locus_tag, feature_start, feature_end, feature_strand in aligned_genes:
-                    row_data_copy = row_data.copy()
-                    target_orientation = "F" if feature_strand == 1 else "R" if feature_strand == -1 else None
-                    
-                    row_data_copy.update({
-                        'locus_tag': locus_tag, 
-                        'offset': get_offset(target_orientation, read.reference_start, read.reference_end, feature_start, feature_end),
-                        'overlap': get_overlap(read.reference_start, read.reference_end, feature_start, feature_end),
-                        'tar_dir': target_orientation
-                    })
-                    
-                    unique_rows[hash_row(row_data_copy)] = row_data_copy
+                    rows_list.append(rows)
 
-    
-    def filter_offtargets_by_pam(unique_rows):
-        targeting_guides = {row_data['spacer'] for row_data in unique_rows.values() if row_data['target']}
-        # Only keep non-targeting guides if they don't appear in the targeting guides set.
-        return {key: val for key, val in unique_rows.items() if not (val['target'] is None and val['spacer'] in targeting_guides)}
+                else:
+                    for locus_tag, feature_start, feature_end, feature_strand in aligned_genes:
+                        target_orientation = "F" if feature_strand == 1 else "R" if feature_strand == -1 else None
+                        offset = get_offset(target_orientation, tar_start, tar_end, feature_start, feature_end)
+                        overlap = get_overlap(tar_start, tar_end, feature_start, feature_end)
 
-    unique_rows = filter_offtargets_by_pam(unique_rows)
+                        rows_copy = rows.copy()
+                        rows_copy.update({
+                            'locus_tag': locus_tag, 
+                            'offset': offset,
+                            'overlap': overlap,
+                            'tar_dir': target_orientation
+                        })
+                        rows_list.append(rows_copy)
 
-    note = {}
-
-    # Create a dictionary to store unique genomic sites for each name
-    sites_by_spacer = {}
-    for row in unique_rows.values():
-        spacer = row['spacer']
-        coords = row['coords']
-        chr = row['chr']
-        if coords is None or chr is None:
-            continue
-        if spacer not in sites_by_spacer:
-            sites_by_spacer[spacer] = set()
-        sites_by_spacer[spacer].add((coords, chr))
-
-    # Group rows by spacer
-    rows_by_spacer = defaultdict(list)
-    for row in unique_rows.values():
-        rows_by_spacer[row['spacer']].append(row)
-
-    # Update notes based on the number of unique genomic sites and ambiguous annotations
-    for spacer, rows in rows_by_spacer.items():
-        sites_set = sites_by_spacer.get(spacer, set())
-        if not sites_set:
-            note[spacer] = ["non-targeting"]
-            continue
-        note[spacer] = [f"{len(sites_set)} {'site' if len(sites_set) == 1 else 'sites'}"]
-
-        gene_rows = [row for row in rows if row['locus_tag'] is not None]
-        intergenic_rows = [row for row in rows if row['locus_tag'] is None and row['target'] is not None]
-        if gene_rows:
-            note[spacer].append(f"{len(gene_rows)} {'gene' if len(gene_rows) == 1 else 'genes'}")
-        if intergenic_rows:
-            note[spacer].append(f"{len(intergenic_rows)} intergenic")
-
-    # Check if target spans the origin of replication
-    for row_data in unique_rows.values():
-        target = row_data['target']
-        if target is None:
-            continue
-
-        spacer = row_data['spacer']
-        tar_start = row_data['tar_start']
-        tar_end = row_data['tar_end']
-        chrom = row_data['chr']
-
-        if tar_start % true_chrom_lengths.get(chrom, None) > tar_end % true_chrom_lengths.get(chrom, None):
-            if spacer not in note:
-                note[spacer] = []
-            note[spacer].append("spans origin")
    
-    # Join the notes and add them to the corresponding rows in unique_rows
-    for row_data in unique_rows.values():
-        spacer = row_data['spacer']
-        if spacer in note:
-            row_data['note'] = ', '.join(note[spacer])
-
-    # return unique_rows
-    return unique_rows
+    return rows_list
 
 
+def filter_offtargets_by_pam(df):
+    targeting_spacers = df[df['target'].notna()]['spacer'].unique()
+    return df[~((df['target'].isna()) & (df['spacer'].isin(targeting_spacers)))]
+
+def create_note(row):
+    parts = []
+    if row['sites'] > 0:
+        parts.append(f"{row['sites']} {'site' if row['sites'] == 1 else 'sites'}")
+        if row['genes'] > 0:
+            parts.append(f"{row['genes']} {'gene' if row['genes'] == 1 else 'genes'}")
+        if row['intergenic'] > 0:
+            parts.append(f"{row['intergenic']} intergenic")
+    else:
+        parts.append("non-targeting")
+    return ', '.join(parts)
 
 # def main(sgrna_file, gb_file, num_mismatches):
 def main(args):
@@ -451,13 +419,43 @@ def main(args):
 
     with pysam.FastaFile(topological_fasta_file_name) as _:
         pass
-    
-    from multiprocessing import Pool
 
     try:
-        console.log("Finding matches...")    
+        console.log("Finding matches...")
+
         results = parse_sam_output(sam_file_name, locus_map, topological_fasta_file_name, args.genome_file, args.pam)
-        results = pd.DataFrame.from_dict(results, orient='index')
+
+        # Convert your data to a DataFrame, then drop duplicates, which are caused by overhangs
+        results = pd.DataFrame(results).drop_duplicates()
+
+        # Use the filter_offtargets_by_pam function
+        results = filter_offtargets_by_pam(results)
+
+        # Create a 'site' column only for rows that have a 'target'
+        results.loc[results['target'].notnull(), 'site'] = results['chr'].astype(str) + '_' + results['coords'].astype(str)
+
+        # Count the number of unique sites, genes, and intergenic regions for each spacer
+        site_counts = results.groupby('spacer')['site'].nunique()
+        gene_counts = results.loc[results['locus_tag'].notnull(), 'spacer'].value_counts()
+        intergenic_counts = results.loc[results['locus_tag'].isnull() & results['target'].notnull(), 'spacer'].value_counts()
+
+        # Combine the counts into a DataFrame
+        note = pd.DataFrame({
+            'sites': site_counts,
+            'genes': gene_counts,
+            'intergenic': intergenic_counts
+        })
+        
+        console.log("Annotating results...")
+
+        # Replace NaN values with 0 and convert the counts to integers
+        note = note.fillna(0).astype(int)
+
+        # Create a 'note' column by applying the create_note function to each row
+        note['note'] = note.apply(create_note, axis=1)
+
+        # Merge the 'note' DataFrame with the 'results' DataFrame based on the 'spacer' column
+        results = results.merge(note[['note']], left_on='spacer', right_index=True, how='left')
 
         column_order = ['name', 'spacer', 'pam', 'chr', 'locus_tag', 'target', 'mismatches', 'coords', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note']
 
@@ -478,8 +476,8 @@ def main(args):
         console.log(f"[bold red]Trouble with Bowtie aligner. User a lower number of mismatches.[/bold red]")
         sys.exit(1)
 
-    except KeyError:
-        console.log(f"[bold red]None of the proposed barcodes map to the genomes.[/bold red]")
+    except KeyError as e:
+        console.log(f"{e}, [bold red]None of the proposed barcodes map to the genomes.[/bold red]")
         sys.exit(1)
 
     console.log(f"Cleaning up...")
