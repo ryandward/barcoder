@@ -13,6 +13,7 @@ zstandard = "*"
 pyzstd = "*"
 psutil = "*"
 rich-cli = "*"
+cutadapt = "*"
 
 [dev-packages]
 pylint = "*"
