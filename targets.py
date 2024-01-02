@@ -9,6 +9,7 @@ import hashlib
 import os
 import pandas as pd
 import platform
+from pyparsing import col
 import pysam
 import re
 import rich
@@ -64,7 +65,7 @@ def create_fake_topological_fastq(topological_fasta_file_name, fastq_file):
 
 
 def create_locus_map(genbank_file_name):
-    locus_map, overhang_continue, organisms, seq_lens, topologies = {}, {}, {}, {}, {}
+    locus_map, overhang_continue, organisms, seq_lens, topologies, all_genes = {}, {}, {}, {}, {}, {}
 
     with open(genbank_file_name, "rt") as input_handle:
         for record in SeqIO.parse(input_handle, "genbank"):
@@ -72,11 +73,15 @@ def create_locus_map(genbank_file_name):
             organisms[record.id] = record.annotations.get('organism', None)
             seq_lens[record.id] = len(record.seq)
             topologies[record.id] = record.annotations.get('topology', None)
+            
+            gene_count = 0
 
             overhang_length = 100_000 if topologies[record.id] == 'circular' else 0
 
             for feature in record.features:
                 if feature.type == "gene":
+                    gene_count += 1
+
                     
                     if isinstance(feature.location, CompoundLocation) and any(part.start == 0 or part.end == len(record.seq) for part in feature.location.parts):
                         
@@ -94,6 +99,7 @@ def create_locus_map(genbank_file_name):
                             key = (record.id, position)
                             locus_map.setdefault(key, []).append(
                                 (feature.qualifiers.get("locus_tag", [None])[0],
+                                feature.qualifiers.get("gene", [None])[0],
                                 adj_start,
                                 adj_end,
                                 feature.strand)
@@ -106,6 +112,7 @@ def create_locus_map(genbank_file_name):
                                 key = (record.id, position)
                                 locus_map.setdefault(key, []).append(
                                     (feature.qualifiers.get("locus_tag", [None])[0],
+                                    feature.qualifiers.get("gene", [None])[0],
                                     int(part_location.start),
                                     int(part_location.end),
                                     feature.strand)
@@ -116,12 +123,16 @@ def create_locus_map(genbank_file_name):
                                     key = (record.id, position + len(record.seq))
                                     locus_map.setdefault(key, []).append(
                                         (feature.qualifiers.get("locus_tag", [None])[0],
+                                        feature.qualifiers.get("gene", [None])[0],
                                         int(part_location.start) + len(record.seq),
                                         int(part_location.end) + len(record.seq),
                                         feature.strand)
                                     )
 
-    return locus_map, organisms, seq_lens, topologies
+                all_genes[record.id] = gene_count
+
+
+    return locus_map, organisms, seq_lens, topologies, all_genes
 
 # Reconstruct the target sequence using the cigar string
 def reconstruct_target(read):
@@ -193,9 +204,13 @@ def get_overlap(tar_start, tar_end, feature_start, feature_end):
 # Check if the extracted PAM matches the PAM pattern
 def pam_matches(pam_pattern, extracted_pam):
     # Convert N to . for regex matching
-    regex_pattern = pam_pattern.replace('N', '.')
     if extracted_pam is None:
         return False
+
+    if pam_pattern == 'N' * len(pam_pattern) or not pam_pattern:
+        return True
+
+    regex_pattern = pam_pattern.replace('N', '.')
     return bool(re.match(regex_pattern, extracted_pam))
 
 # Extract the PAM of the target sequence from the topological map
@@ -203,8 +218,12 @@ def extract_pam(pam, tar_start, tar_end, chrom, fasta, dir, true_chrom_lengths, 
     true_chrom_length = true_chrom_lengths.get(chrom, None)
     topological_chrom_length = topological_chrom_lengths.get(chrom, None)
 
+    if pam == "":
+        return None
+
     if None in (pam, tar_start, tar_end, chrom, fasta, dir, true_chrom_length, topological_chrom_length):
         return None
+    
 
     if dir == 'F':
         if tar_end + len(pam) > topological_chrom_length:
@@ -230,50 +249,35 @@ def parse_sam_output(samfile, locus_map, topological_fasta_file_name, gb_file_na
 
     with pysam.FastaFile(topological_fasta_file_name) as fasta:
         for read in samfile.fetch():
-            extracted_pam = extract_pam(
-                pam, read.reference_start, read.reference_end, read.reference_name, fasta, 
-                "F" if not read.is_reverse else "R", true_chrom_lengths, topological_chrom_lengths)
-            
             if read.query_sequence is None:
                 continue
+                        
+            extracted_pam = None
+            
+            if pam:
+                extracted_pam = extract_pam(
+                    pam, read.reference_start, read.reference_end, read.reference_name, fasta, 
+                    "F" if not read.is_reverse else "R", true_chrom_lengths, topological_chrom_lengths)
+
+                if read.is_mapped:
+                    if extracted_pam is None:
+                        continue
+                    # exclude reads that don't match the PAM
+                    if not pam_matches(pam, extracted_pam):
+                        read.is_unmapped = True
+                        extracted_pam = None
 
             rows = {
                 'name': read.query_name,
                 'spacer': read.query_sequence if not read.is_reverse else str(Seq(read.query_sequence).reverse_complement()),
                 'len': len(read.query_sequence),
-           }    
+            }    
 
-            if not read.is_unmapped:
-                # exclude reads that don't match the PAM
-                if not pam_matches(pam, extracted_pam):
-                    read.is_unmapped = True
-
-                # skip reads where topological map ran out
-                if extracted_pam is None:
-                    continue
-        
             if read.is_unmapped:
-                rows.update({
-                    'type': 'control',
-                    'chr': None,
-                    'tar_start': None,
-                    'tar_end': None,
-                    'target': None,
-                    'mismatches': None,
-                    'sp_dir': None,
-                    'pam': None,
-                    'diff': None,
-                    'coords': None,
-                    'locus_tag': None, 
-                    'offset': None,
-                    'overlap': None,
-                    'tar_dir': None
-                })
-
                 rows_list.append(rows)
                 continue
             
-            if not read.is_unmapped and read.reference_start is not None and read.reference_end is not None:
+            if read.is_mapped and read.reference_start is not None and read.reference_end is not None:
                 
                 try:
                     target = read.get_reference_sequence() if not read.is_reverse else str(Seq(read.get_reference_sequence()).reverse_complement())
@@ -314,10 +318,11 @@ def parse_sam_output(samfile, locus_map, topological_fasta_file_name, gb_file_na
                         'overlap': None,
                         'tar_dir': None
                     })
+
                     rows_list.append(rows)
 
                 else:
-                    for locus_tag, feature_start, feature_end, feature_strand in aligned_genes:
+                    for locus_tag, gene_name, feature_start, feature_end, feature_strand in aligned_genes:
                         target_orientation = "F" if feature_strand == 1 else "R" if feature_strand == -1 else None
                         offset = get_offset(target_orientation, tar_start, tar_end, feature_start, feature_end)
                         overlap = get_overlap(tar_start, tar_end, feature_start, feature_end)
@@ -325,10 +330,12 @@ def parse_sam_output(samfile, locus_map, topological_fasta_file_name, gb_file_na
                         rows_copy = rows.copy()
                         rows_copy.update({
                             'locus_tag': locus_tag, 
+                            'gene': gene_name if gene_name else locus_tag,
                             'offset': offset,
                             'overlap': overlap,
                             'tar_dir': target_orientation
                         })
+
                         rows_list.append(rows_copy)
 
    
@@ -344,13 +351,28 @@ def run_bowtie_and_parse(sgrna_fastq_file_name, topological_fasta_file_name, loc
         index_prefix = os.path.join(temp_dir, genome_index_temp_name)
 
         with open(os.devnull, "w") as devnull:
-            bowtie_build_command = ["bowtie-build", topological_fasta_file_name, index_prefix]
+            
+            bowtie_build_command = [
+                "bowtie-build", 
+                topological_fasta_file_name, 
+                index_prefix]
+            
             bowtie_build_process = subprocess.Popen(bowtie_build_command, stdout=devnull, stderr=devnull)
             bowtie_build_process.wait()
 
             # Create a temporary file for the bowtie output
             with tempfile.NamedTemporaryFile(delete=False) as bowtie_output_temp_file:
-                bowtie_command = ["bowtie", "-k 100", "--nomaqround", "-p", str(num_threads), "--tryhard", "-v", str(num_mismatches), "-S", "-x", index_prefix, sgrna_fastq_file_name]
+
+                bowtie_command = [
+                    "bowtie", 
+                    "-S", 
+                    "-k 100", 
+                    "--nomaqround", 
+                    "-p", str(num_threads), 
+                    "--tryhard", 
+                    "-v", str(num_mismatches), 
+                    "-x", index_prefix, sgrna_fastq_file_name]
+
                 bowtie_process = subprocess.Popen(bowtie_command, stdout=bowtie_output_temp_file, stderr=devnull)
                 bowtie_process.wait()
 
@@ -407,7 +429,7 @@ def main(args):
             sys.exit(1)
 
         console.log("Generating topological coordinate maps...")
-        locus_map, organisms, seq_lens, topologies = create_locus_map(args.genome_file)
+        locus_map, organisms, seq_lens, topologies, all_genes = create_locus_map(args.genome_file)
 
         create_topological_fasta(args.genome_file, topological_fasta_file_name)
 
@@ -427,12 +449,26 @@ def main(args):
         results = filter_offtargets_by_pam(results)
         
         # Create a 'min_tar' column that is the minimum of 'tar_start' and 'tar_end'
-        results['min_tar'] = results[['tar_start', 'tar_end']].min(axis=1)
+        def adjust_min_tar(row):
+            if row['tar_start'] > row['tar_end']:
+                return row['tar_start'] - seq_lens[row['chr']]
+            else:
+                return row['tar_start']
 
+        results['min_tar'] = results.apply(adjust_min_tar, axis=1)
+        
         # Sort the DataFrame by 'chr', 'min_tar', and 'spacer'
         results = results.sort_values(by=['chr', 'min_tar', 'spacer'])
 
-        print(results, file=sys.stderr)
+        # count the number of times each spacer was seen after grouping by 'name' and 'spacer'
+        spacers_seen = results[['name', 'spacer']].drop_duplicates().groupby('spacer').size()
+
+        # now drop the name column
+        results = results.drop('name', axis=1).drop_duplicates()
+
+        # print(spacers_seen, file=sys.stderr)
+
+        # print(results, file=sys.stderr)
 
         # Create a 'site' column only for rows that have a 'target'
         results.loc[results['target'].notnull(), 'site'] = results['chr'].astype(str) + '_' + results['coords'].astype(str)
@@ -444,10 +480,13 @@ def main(args):
 
         # Combine the counts into a DataFrame
         note = pd.DataFrame({
+            'count': spacers_seen,
             'sites': site_counts,
             'genes': gene_counts,
             'intergenic': intergenic_counts
         })
+
+        # print(note, file=sys.stderr)
         
         console.log("Annotating results...")
 
@@ -460,17 +499,23 @@ def main(args):
         # Merge the 'note' DataFrame with the 'results' DataFrame based on the 'spacer' column
         results = results.merge(note, left_on='spacer', right_index=True, how='left')
         
-        column_order = ['name', 'spacer', 'pam', 'chr', 'locus_tag', 'target', 'mismatches', 'coords', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note']
+        column_order = ['spacer','locus_tag', 'gene', 'chr']
 
-        # Ensure all columns in column_order exist in the DataFrame, fill with None if absent
-        for column in column_order:
-            if column not in results.columns:
-                results[column] = None
+        if not (results['count'] == 1).all():
+            column_order.append('count')
 
+        if not (results['pam'].isnull().all() or results['pam'].nunique() == 1):
+            column_order.append('pam')
+
+        if not (results['mismatches'] == 0).all():
+            column_order.append('mismatches')
+
+        column_order.extend(['target', 'tar_start', 'tar_end', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note'])
+        
         # Reorder the DataFrame columns according to column_order
-        final_results = results[column_order]
+        final_results = results.reindex(columns=column_order, fill_value=None)
 
-        integer_cols = ['mismatches', 'offset', 'overlap']
+        integer_cols = ['mismatches', 'offset', 'overlap', 'tar_start', 'tar_end']
         
         final_results.loc[:, integer_cols] = final_results[integer_cols].astype('Int64')
 
@@ -537,11 +582,13 @@ def main(args):
     ambiguous_coordinates = {(chrom, pos % seq_lens[chrom]) for chrom, pos in locus_map if len(locus_map[(chrom, pos)]) > 1}
     ambiguous_locus_tags = {entry[0] for chrom, pos in ambiguous_coordinates for entry in locus_map[(chrom, pos)]}
   
-    combined_table.add_row("Chromosomes", f"[bold]{len(set(key[0] for key in locus_map.keys()))}[/bold]")
-    combined_table.add_row("Total Genes", f"[bold]{len(set(value[0][0] for value in locus_map.values())):,}[/bold]")
-    
-    combined_table.add_row("Ambiguous Coordinates", f"[bold]{len(ambiguous_coordinates):,}[/bold]")
+    # number of chromosomes from seq_lens
+
+    combined_table.add_row("Chromosomes", f"[bold]{len(seq_lens)}[/bold]")
+    combined_table.add_row("Total Genes", f"[bold]{sum(all_genes.values()):,}[/bold]")
+
     combined_table.add_row("Overlapping Genes", f"[bold]{len(ambiguous_locus_tags):,}[/bold]")
+    combined_table.add_row("Ambiguous Coordinates", f"[bold]{len(ambiguous_coordinates):,}[/bold]")
 
     # Barcode Mapping Stats Sub-heading
     combined_table.add_section()
@@ -561,10 +608,9 @@ def main(args):
 
     combined_table.add_row("Unique Barcodes", f"[bold]{unique_barcodes:,}[/bold]")
 
-    unique_spacers_per_mismatch = results.groupby('mismatches')['spacer'].apply(set)
+    unique_spacers_per_mismatch = final_results.groupby(['mismatches'])['spacer'].nunique()
 
-    for mismatch, unique_spacers in unique_spacers_per_mismatch.items():
-        count = len(unique_spacers)
+    for mismatch, count in unique_spacers_per_mismatch.items():
         combined_table.add_row(f"{mismatch} Mismatch Barcodes", f"[bold]{count:,}[/bold]")
 
     intergenic_spacers = results[(results['locus_tag'].isnull()) & (results['chr'].notnull())]['spacer'].nunique()
