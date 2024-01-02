@@ -102,7 +102,7 @@ def create_locus_map(genbank_file_name):
                                 feature.qualifiers.get("gene", [None])[0],
                                 adj_start,
                                 adj_end,
-                                feature.strand)
+                                feature.location.strand)
                             )
 
                     else:
@@ -115,7 +115,7 @@ def create_locus_map(genbank_file_name):
                                     feature.qualifiers.get("gene", [None])[0],
                                     int(part_location.start),
                                     int(part_location.end),
-                                    feature.strand)
+                                    feature.location.strand)
                                 )
 
                                 # add the rest of the overhang
@@ -126,7 +126,7 @@ def create_locus_map(genbank_file_name):
                                         feature.qualifiers.get("gene", [None])[0],
                                         int(part_location.start) + len(record.seq),
                                         int(part_location.end) + len(record.seq),
-                                        feature.strand)
+                                        feature.location.strand)
                                     )
 
                 all_genes[record.id] = gene_count
