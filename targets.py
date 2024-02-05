@@ -548,11 +548,12 @@ def main(args):
         column_order.extend(['target', 'tar_start', 'tar_end', 'offset', 'overlap', 'sp_dir', 'tar_dir', 'note'])
         
         # Reorder the DataFrame columns according to column_order
-        final_results = results.reindex(columns=column_order, fill_value=None)
+        final_results = results.reindex(columns=column_order)
 
         integer_cols = ['mismatches', 'offset', 'overlap', 'tar_start', 'tar_end']
-        
-        final_results.loc[:, integer_cols] = final_results[integer_cols].astype('Int64')
+
+        # Convert the columns in integer_cols to 'Int64', which supports NaN values
+        final_results[integer_cols] = final_results[integer_cols].astype('Int64')
 
 
     except FileNotFoundError:
