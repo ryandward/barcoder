@@ -14,9 +14,13 @@ pyzstd = "*"
 psutil = "*"
 rich-cli = "*"
 cutadapt = "*"
+argpar = "*"
+argparse = "*"
 
 [dev-packages]
 pylint = "*"
+jupyter = "*"
+notebook = "*"
 
 [requires]
 python_version = "3.11"
