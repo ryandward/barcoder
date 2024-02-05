@@ -16,6 +16,7 @@ rich-cli = "*"
 cutadapt = "*"
 argpar = "*"
 argparse = "*"
+pyarrow = "*"
 
 [dev-packages]
 pylint = "*"
