@@ -213,7 +213,7 @@ def pam_matches(pam_pattern, extracted_pam):
     regex_pattern = pam_pattern.replace('N', '.')
     return bool(re.match(regex_pattern, extracted_pam))
 
-# Extract the PAM of the target sequence from the topological map
+# Extract the downstream PAM of the target sequence from the topological map
 def extract_pam(pam, tar_start, tar_end, chrom, fasta, dir, true_chrom_lengths, topological_chrom_lengths):
     true_chrom_length = true_chrom_lengths.get(chrom, None)
     topological_chrom_length = topological_chrom_lengths.get(chrom, None)
@@ -228,21 +228,51 @@ def extract_pam(pam, tar_start, tar_end, chrom, fasta, dir, true_chrom_lengths, 
     if dir == 'F':
         if tar_end + len(pam) > topological_chrom_length:
             return None
-        pam = fasta.fetch(reference=chrom, start=tar_end, end=tar_end + len(pam)).upper()
+        extracted_pam = fasta.fetch(reference=chrom, start=tar_end, end=tar_end + len(pam)).upper()
 
     elif dir == 'R':
         if tar_start - len(pam) < 0:
             return None
-        pam = fasta.fetch(reference=chrom, start=tar_start - len(pam), end=tar_start).upper()
-        pam = str(Seq(pam).reverse_complement())
+        extracted_pam = fasta.fetch(reference=chrom, start=tar_start - len(pam), end=tar_start).upper()
+        extracted_pam = str(Seq(extracted_pam).reverse_complement())
 
     else:
         return None
 
-    return pam
+    return extracted_pam
+
+
+
+# Extract the upstream PAM of the target sequence from the topological map
+def extract_upstream_pam(pam, tar_start, tar_end, chrom, fasta, dir, true_chrom_lengths, topological_chrom_lengths):
+    true_chrom_length = true_chrom_lengths.get(chrom, None)
+    topological_chrom_length = topological_chrom_lengths.get(chrom, None)
+
+    if pam == "":
+        return None
+
+    if None in (pam, tar_start, tar_end, chrom, fasta, dir, true_chrom_length, topological_chrom_length):
+        return None
+
+    if dir == 'F':
+        if tar_start - len(pam) < 0:
+            return None
+        extracted_pam = fasta.fetch(reference=chrom, start=tar_start - len(pam), end=tar_start).upper()
+
+    elif dir == 'R':
+        if tar_end + len(pam) > topological_chrom_length:
+            return None
+        extracted_pam = fasta.fetch(reference=chrom, start=tar_end, end=tar_end + len(pam)).upper()
+        extracted_pam = str(Seq(extracted_pam).reverse_complement())
+
+    else:
+        return None
+
+    return extracted_pam
+
 
 # Parse the SAM file and extract the relevant information
-def parse_sam_output(samfile, locus_map, topological_fasta_file_name, gb_file_name, pam):
+def parse_sam_output(samfile, locus_map, topological_fasta_file_name, gb_file_name, pam, pam_direction):
     rows_list = []  # Initialize an empty list
     true_chrom_lengths = get_true_chrom_lengths(gb_file_name)
     topological_chrom_lengths = get_topological_chrom_lengths(topological_fasta_file_name)
@@ -254,11 +284,16 @@ def parse_sam_output(samfile, locus_map, topological_fasta_file_name, gb_file_na
                         
             extracted_pam = None
             
-            if pam:
-                extracted_pam = extract_pam(
-                    pam, read.reference_start, read.reference_end, read.reference_name, fasta, 
-                    "F" if not read.is_reverse else "R", true_chrom_lengths, topological_chrom_lengths)
-
+            if pam :
+                if pam_direction == 'downstream':
+                    extracted_pam = extract_pam(
+                        pam, read.reference_start, read.reference_end, read.reference_name, fasta, 
+                        "F" if not read.is_reverse else "R", true_chrom_lengths, topological_chrom_lengths)
+                elif pam_direction == 'upstream':
+                    extracted_pam = extract_upstream_pam(
+                        pam, read.reference_start, read.reference_end, read.reference_name, fasta, 
+                        "F" if not read.is_reverse else "R", true_chrom_lengths, topological_chrom_lengths)
+                    
                 if read.is_mapped:
                     if extracted_pam is None:
                         continue
@@ -377,7 +412,7 @@ def run_bowtie_and_parse(sgrna_fastq_file_name, topological_fasta_file_name, loc
                 bowtie_process.wait()
 
                 with pysam.AlignmentFile(bowtie_output_temp_file.name, "r") as samfile:
-                    results = parse_sam_output(samfile, locus_map, topological_fasta_file_name, args.genome_file, args.pam)
+                    results = parse_sam_output(samfile, locus_map, topological_fasta_file_name, args.genome_file, args.pam, args.pam_direction)
 
                 # Delete the temporary file after we're done with it
                 os.remove(bowtie_output_temp_file.name)
@@ -634,6 +669,7 @@ if __name__ == "__main__":
     parser.add_argument("genome_file", help="Path to genome_gb_file", type=str)
     parser.add_argument("pam", help="PAM sequence", type=str)
     parser.add_argument("mismatches", help="Number of allowed mismatches", type=int)
+    parser.add_argument("--pam_direction", choices=['upstream', 'downstream'], default='downstream', help="Direction of the PAM sequence")
 
     args = parser.parse_args()
 
