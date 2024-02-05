@@ -7,6 +7,8 @@ from multiprocessing import cpu_count
 import gzip
 import hashlib
 import os
+import json
+from matplotlib.font_manager import json_dump
 import pandas as pd
 import platform
 from pyparsing import col
@@ -30,7 +32,7 @@ def open_file(file, mode):
     return gzip.open(file, mode) if file.endswith(".gz") else open(file, mode)
 
 def create_working_directory(dir_name="working_directory"):
-  
+
     os.makedirs(dir_name, exist_ok=True)
     return dir_name
 
@@ -318,8 +320,14 @@ def parse_sam_output(samfile, locus_map, topological_fasta_file_name, gb_file_na
                     target = read.get_reference_sequence() if not read.is_reverse else str(Seq(read.get_reference_sequence()).reverse_complement())
                     mismatches = int(read.get_tag('NM'))
                     chr = read.reference_name
+                    
                     tar_start = read.reference_start % true_chrom_lengths.get(chr, None)
                     tar_end = read.reference_end % true_chrom_lengths.get(chr, None)
+
+                    # Adjust tar_start if it spans the origin
+                    if tar_end < tar_start:
+                        tar_start -= true_chrom_lengths.get(chr, None)
+                    
                     sp_dir = "F" if not read.is_reverse else "R"
                     coords = get_coords(tar_start, tar_end, true_chrom_lengths.get(chr, None))
                     type = 'mismatch' if mismatches > 0 else 'perfect'
@@ -373,7 +381,7 @@ def parse_sam_output(samfile, locus_map, topological_fasta_file_name, gb_file_na
 
                         rows_list.append(rows_copy)
 
-   
+
     return rows_list
 
 
@@ -481,7 +489,14 @@ def main(args):
         results = pd.DataFrame(results).drop_duplicates()
 
         # Use the filter_offtargets_by_pam function
-        results = filter_offtargets_by_pam(results)
+        try:
+            results = filter_offtargets_by_pam(results)
+        except KeyError as e:
+            console.log(f"[bold red]The following critical attribute is missing for every barcode:[/bold red] {e}")
+            console.log(f"[bold yellow]Are you sure your PAM should be[/bold yellow] \'{args.pam}\' \'{args.pam_direction}\' [bold yellow]of the spacer?[/bold yellow]")
+            console.log(f"[bold yellow]The genome file[/bold yellow] \'{args.genome_file}\' [bold yellow]has definitions for these chromosomes:[/bold yellow]")
+            console.log(json.dumps(organisms, indent=4))
+            sys.exit(1)
         
         # Create a 'min_tar' column that is the minimum of 'tar_start' and 'tar_end'
         def adjust_min_tar(row):
@@ -562,15 +577,17 @@ def main(args):
         integer_cols = ['mismatches', 'offset', 'overlap', 'tar_start', 'tar_end']
 
         # Convert the columns in integer_cols to 'Int64', which supports NaN values
-        final_results[integer_cols] = final_results[integer_cols].astype('Int64')
+        for col in integer_cols:
+            if col in final_results.columns:
+                final_results[col] = final_results[col].astype('Int64')
 
 
     except FileNotFoundError:
-        console.log(f"[bold red]Trouble with Bowtie aligner. User a lower number of mismatches.[/bold red]")
+        console.log(f"[bold red]Trouble with Bowtie aligner. Try using a lower number of mismatches.[/bold red]")
         sys.exit(1)
 
     except KeyError as e:
-        console.log(f"{e}, [bold red]None of the proposed barcodes map to the genomes.[/bold red]")
+        console.log(f"[bold red]All of the proposed barcodes are missing some key attributes[/bold red]: {e}")
         sys.exit(1)
 
     console.log(f"Cleaning up...")
@@ -606,7 +623,7 @@ def main(args):
     elif args.pam_direction == 'upstream':
         combined_table.add_row("PAM Direction", f"[bold]Upstream[/bold]")
     
-   
+
     combined_table.add_row("Number of Mismatches", f"[bold]{args.mismatches}[/bold]")
     combined_table.add_row("Threads", f"[bold]{num_threads}[/bold]")
     combined_table.add_row("Operating System", f"[bold]{platform.system()}[/bold]")
@@ -649,7 +666,7 @@ def main(args):
 
     ambiguous_coordinates = {(chrom, pos % seq_lens[chrom]) for chrom, pos in locus_map if len(locus_map[(chrom, pos)]) > 1}
     ambiguous_locus_tags = {entry[0] for chrom, pos in ambiguous_coordinates for entry in locus_map[(chrom, pos)]}
-  
+
     # number of chromosomes from seq_lens
 
     combined_table.add_row("Chromosomes", f"[bold]{len(seq_lens)}[/bold]")
@@ -677,10 +694,11 @@ def main(args):
 
     combined_table.add_row("Unique Barcodes", f"[bold]{unique_barcodes:,}[/bold]")
 
-    unique_spacers_per_mismatch = final_results.groupby(['mismatches'])['spacer'].nunique()
+    if 'mismatches' in final_results.columns:
+        unique_spacers_per_mismatch = final_results.groupby(['mismatches'])['spacer'].nunique()
 
-    for mismatch, count in unique_spacers_per_mismatch.items():
-        combined_table.add_row(f"{mismatch} Mismatch Barcodes", f"[bold]{count:,}[/bold]")
+        for mismatch, count in unique_spacers_per_mismatch.items():
+            combined_table.add_row(f"{mismatch} Mismatch Barcodes", f"[bold]{count:,}[/bold]")
 
     intergenic_spacers = results[(results['locus_tag'].isnull()) & (results['chr'].notnull())]['spacer'].nunique()
     combined_table.add_row("Intergenic Barcodes", f"[bold]{intergenic_spacers:,}[/bold]")
