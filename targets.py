@@ -512,6 +512,15 @@ def main(args):
         site_counts = results.groupby('spacer')['site'].nunique()
         gene_counts = results.loc[results['locus_tag'].notnull(), 'spacer'].value_counts()
         intergenic_counts = results.loc[results['locus_tag'].isnull() & results['target'].notnull(), 'spacer'].value_counts()
+        
+        # get the lengths of the spacers into a set
+        spacer_lengths = set(results['len'])
+        
+        # convert into a string, separated by commas of all the lengths
+        if len(spacer_lengths) == 1:
+            spacer_len_range = str(next(iter(spacer_lengths)))
+        else:
+            spacer_len_range = ",".join(str(spacer_len) for spacer_len in sorted(spacer_lengths))
 
         # Combine the counts into a DataFrame
         note = pd.DataFrame({
@@ -589,7 +598,15 @@ def main(args):
     # Rows for Input & Configuration
     combined_table.add_row("Barcodes", f"[bold]{os.path.basename(args.sgrna_file)}[/bold]")
     combined_table.add_row("Genbank Genome File", f"[bold]{os.path.basename(args.genome_file)}[/bold]")
+    
     combined_table.add_row("PAM", f"[bold]{args.pam}[/bold]")
+
+    if args.pam_direction == 'downstream':
+        combined_table.add_row("PAM Direction", f"[bold]Downstream[/bold]")
+    elif args.pam_direction == 'upstream':
+        combined_table.add_row("PAM Direction", f"[bold]Upstream[/bold]")
+    
+   
     combined_table.add_row("Number of Mismatches", f"[bold]{args.mismatches}[/bold]")
     combined_table.add_row("Threads", f"[bold]{num_threads}[/bold]")
     combined_table.add_row("Operating System", f"[bold]{platform.system()}[/bold]")
@@ -597,6 +614,21 @@ def main(args):
     # Heuristic Statistics Sub-heading
     combined_table.add_section()
     combined_table.add_row("[bold bright_blue]Heuristics[/bold bright_blue]", "")
+
+    # barcode lengths
+    combined_table.add_row("Spacer Lengths", f"[bold]{spacer_len_range}[/bold]")
+
+    systematic_name = None
+
+    if args.pam_direction == 'downstream':
+        # call it spacer_range + PAM
+        systematic_name = f"{spacer_len_range}-{args.pam}"
+    elif args.pam_direction == 'upstream':
+        # call it PAM + spacer_range
+        systematic_name = f"{args.pam}-{spacer_len_range}"
+    
+    if systematic_name: 
+        combined_table.add_row("Systematic Name", f"[bold]{systematic_name}[/bold]")  
 
     unique_organisms = set(organisms.values())
 
@@ -629,6 +661,7 @@ def main(args):
     # Barcode Mapping Stats Sub-heading
     combined_table.add_section()
     combined_table.add_row("[bold bright_green]Barcode Mapping Stats[/bold bright_green]", "")
+    
 
     unique_chrs = results['chr'].nunique()
     combined_table.add_row("Chromosomes Targeted", f"[bold]{unique_chrs:,}[/bold]")
