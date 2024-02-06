@@ -183,7 +183,31 @@ class GenBankProcessor:
 
         return locus_map
 
+class Barcode:
+    def __init__(self, sequence):
+        self.sequence = sequence
+        # other barcode-specific attributes...
 
-# Create a GenBankProcessor object
-gbp = GenBankProcessor("GCA_003054575.1.gb")
+    # barcode-specific methods...
 
+class BarcodedLibrary:
+    def __init__(self):
+        self.barcodes = set()
+
+    def add_barcode(self, sequence):
+        barcode = Barcode(sequence)
+        self.barcodes.add(barcode)
+
+    @property
+    @lru_cache(maxsize=None)
+    def size(self):
+        return len(self.barcodes)
+    
+    # @property
+    # @lru_cache(maxsize=None)
+    # def pam_pattern(self):
+        # extract PAM pattern from each barcode and generalize to a pattern where N represents the variable position
+        
+    # @property
+    # @lru_cache(maxsize=None)
+    # other library-specific methods...    pass
