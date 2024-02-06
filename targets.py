@@ -83,9 +83,12 @@ def create_locus_map(genbank_file_name):
             for feature in record.features:
                 if feature.type == "gene":
                     gene_count += 1
-
+                    locus_tag = feature.qualifiers.get("locus_tag", [None])[0]
+                    gene_name = feature.qualifiers.get("gene", [None])[0]
                     
-                    if isinstance(feature.location, CompoundLocation) and any(part.start == 0 or part.end == len(record.seq) for part in feature.location.parts):
+                    if isinstance(
+                        feature.location, CompoundLocation) and any(
+                            part.start == 0 or part.end == len(record.seq) for part in feature.location.parts):
                         
                         # Find segments that wrap around the genome
                         genome_end_segment = next(part for part in feature.location.parts if part.end == len(record.seq))
@@ -100,8 +103,8 @@ def create_locus_map(genbank_file_name):
                         for position in range(adj_start, adj_end):
                             key = (record.id, position)
                             locus_map.setdefault(key, []).append(
-                                (feature.qualifiers.get("locus_tag", [None])[0],
-                                feature.qualifiers.get("gene", [None])[0],
+                                (locus_tag,
+                                gene_name,
                                 adj_start,
                                 adj_end,
                                 feature.location.strand)
@@ -109,12 +112,20 @@ def create_locus_map(genbank_file_name):
 
                     else:
                         # normal genes
-                        for part_location in feature.location.parts if isinstance(feature.location, CompoundLocation) else [feature.location]:
+                        # Check the type of feature.location before the loop
+                        if isinstance(feature.location, CompoundLocation):
+                            locations = feature.location.parts
+                        else:
+                            locations = [feature.location]
+
+                        # Now you can iterate over locations without creating a new list in each iteration
+                        for part_location in locations:
+                            # rest of your code
                             for position in range(int(part_location.start), int(part_location.end)):
                                 key = (record.id, position)
                                 locus_map.setdefault(key, []).append(
-                                    (feature.qualifiers.get("locus_tag", [None])[0],
-                                    feature.qualifiers.get("gene", [None])[0],
+                                    (locus_tag,
+                                    gene_name,
                                     int(part_location.start),
                                     int(part_location.end),
                                     feature.location.strand)
@@ -124,8 +135,8 @@ def create_locus_map(genbank_file_name):
                                 if overhang_continue[record.id] <= position < overhang_length:
                                     key = (record.id, position + len(record.seq))
                                     locus_map.setdefault(key, []).append(
-                                        (feature.qualifiers.get("locus_tag", [None])[0],
-                                        feature.qualifiers.get("gene", [None])[0],
+                                        (locus_tag,
+                                        gene_name,
                                         int(part_location.start) + len(record.seq),
                                         int(part_location.end) + len(record.seq),
                                         feature.location.strand)
