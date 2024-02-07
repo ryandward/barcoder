@@ -113,8 +113,6 @@ class GenBankProcessor:
             record,
         ) in self.records.items():
             for feature in record.features:
-                strand = feature.location.strand
-
                 # Check if the feature location is a CompoundLocation
                 if isinstance(feature.location, CompoundLocation):
                     # If so, use the parts of the location
@@ -134,8 +132,8 @@ class GenBankProcessor:
                             "id": id,
                             "feature": feature,  # Store the entire SeqFeature object
                             "sequence": record.seq[start:end],
-                            "strand": strand,
-                            "feature_type": feature.type,  # Include the feature type
+                            # "strand": feature.location.strand,
+                            # "feature_type": feature.type,  # Include the feature type
                         },
                     )
                     locus_tree.add(interval)
@@ -226,23 +224,24 @@ gbr = GenBankReader("GCA_000005845.2.gb")
 
 gbp = GenBankProcessor(gbr.records)
 
-# # read example_ranges.tsv as a pandas dataframe and convert to a list of tuples
 
-# ranges = pd.read_csv("example_ranges.tsv", sep="\t")
+# read example_ranges.tsv as a pandas dataframe and convert to a list of tuples
 
-# print(ranges)
+ranges = pd.read_csv("example_ranges.tsv", sep="\t")
 
-# ranges = [tuple(x) for x in ranges.values]
+print(ranges)
 
-# for start, end in ranges:
-#     overlapping_intervals = gbp.locus_tree.overlap(start, end)
-#     for interval in overlapping_intervals:
-#         feature = interval.data["feature"]
-#         if isinstance(feature.location, Bio.SeqFeature.CompoundLocation):
-#             print(f"Query range: {start}-{end}")
-#             print(f"Overlapping interval: {interval}")
-#             print(f"Feature type: {interval.data['feature_type']}")
-#             print(f"Qualifiers: {interval.data['feature'].qualifiers}")
-#             print()
+ranges = [tuple(x) for x in ranges.values]
+
+for start, end in ranges:
+    overlapping_intervals = gbp.locus_tree.overlap(start, end)
+    for interval in overlapping_intervals:
+        feature = interval.data["feature"]
+        if isinstance(feature.location, Bio.SeqFeature.CompoundLocation):
+            print(f"Query range: {start}-{end}")
+            print(f"Overlapping interval: {interval}")
+            print(f"Feature type: {interval.data['feature'].type}")
+            print(f"Qualifiers: {interval.data['feature'].qualifiers}")
+            print()
 
 # Assuming gbp.fastas is a dictionary of sequences
