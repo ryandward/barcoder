@@ -17,7 +17,7 @@ cutadapt = "*"
 argpar = "*"
 argparse = "*"
 pyarrow = "*"
-codes = "*"
+intervaltree = "*"
 
 [dev-packages]
 pylint = "*"

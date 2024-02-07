@@ -590,8 +590,11 @@ def run_bowtie_and_parse(
                 ]
 
                 bowtie_process = subprocess.Popen(
-                    bowtie_command, stdout=bowtie_output_temp_file, stderr=devnull
+                    bowtie_command, 
+                    stdout=bowtie_output_temp_file, 
+                    stderr=devnull
                 )
+                
                 bowtie_process.wait()
 
                 with pysam.AlignmentFile(bowtie_output_temp_file.name, "r") as samfile:
