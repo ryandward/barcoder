@@ -550,6 +550,7 @@ def run_bowtie_and_parse(
     num_mismatches,
     num_threads,
 ):
+    results = []
     # Create a temporary directory for the bowtie index files
     with tempfile.TemporaryDirectory() as temp_dir:
         # Create a temporary name for the genome index
@@ -567,7 +568,9 @@ def run_bowtie_and_parse(
             ]
 
             bowtie_build_process = subprocess.Popen(
-                bowtie_build_command, stdout=devnull, stderr=devnull
+                bowtie_build_command, 
+                stdout=devnull, 
+                stderr=devnull
             )
             bowtie_build_process.wait()
 
@@ -591,13 +594,16 @@ def run_bowtie_and_parse(
 
                 bowtie_process = subprocess.Popen(
                     bowtie_command, 
-                    stdout=bowtie_output_temp_file, 
-                    stderr=devnull
+                    stdout=subprocess.PIPE, 
+                    stderr=devnull,
+                    universal_newlines=True
                 )
-                
-                bowtie_process.wait()
 
-                with pysam.AlignmentFile(bowtie_output_temp_file.name, "r") as samfile:
+        if bowtie_process.stdout is None:
+            raise RuntimeError("Bowtie was unable to start. Check your installation.")    
+        
+        if bowtie_process.stdout is not None:
+                with pysam.AlignmentFile(bowtie_process.stdout, "r") as samfile:
                     results = parse_sam_output(
                         samfile,
                         locus_map,
@@ -607,11 +613,16 @@ def run_bowtie_and_parse(
                         args.pam_direction,
                     )
 
+                bowtie_process.wait()
+
                 # Delete the temporary file after we're done with it
                 os.remove(bowtie_output_temp_file.name)
 
     # Return the results of parse_sam_output
-    return results
+    if results is []:
+        raise RuntimeError("No results were returned from the Bowtie process. Check your input files and parameters.")
+    else:
+        return results
 
 
 # Filter out spacers that don't match the PAM
