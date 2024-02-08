@@ -1,27 +1,28 @@
+# Standard library imports
+from collections import defaultdict
+from functools import lru_cache, wraps
+from itertools import islice
 from math import e
+import csv
+import json
+import logging
+import os
 import select
+import subprocess
+import tempfile
 from tracemalloc import start
+
+# Related third party imports
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqFeature import CompoundLocation
+from Bio.SeqRecord import SeqRecord
 import Bio.SeqFeature
-from functools import lru_cache
-import json
-from itertools import islice
+from intervaltree import Interval, IntervalTree
 import pandas as pd
+import pysam
 from rich.console import Console
 from rich.logging import RichHandler
-import logging
-from functools import wraps
-from collections import defaultdict
-from intervaltree import Interval, IntervalTree
-from Bio import SeqIO
-from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
-import tempfile
-import os
-import pysam
-import subprocess
 
 # Configure logging
 logging.basicConfig(
@@ -58,10 +59,9 @@ class GenBankReader:
 
 
 # Class to process GenBank files
-class GenBankProcessor:
-    def __init__(self, records):
-        self.records = records
-        self.console = Console(stderr=True, style="bold blue")
+class GenBankParser:
+    def __init__(self, filename):
+        self.records = GenBankReader(filename).records
 
     @property
     @lru_cache(maxsize=None)
@@ -144,10 +144,6 @@ class GenBankProcessor:
             SeqIO.write(self.records.values(), fasta_file, "fasta")
 
 
-from Bio import SeqIO
-import csv
-
-
 class BarCode:
     def __init__(self, sequence: Seq):
         if not isinstance(sequence, Seq):
@@ -155,17 +151,10 @@ class BarCode:
         self.sequence = sequence
 
 
-import csv
-from Bio import SeqIO
-
-import csv
-from Bio import SeqIO
-
-
 class BarCodeLibraryReader:
-    def __init__(self, filename, barcode_column=None):
+    def __init__(self, filename, column=None):
         self.filename = filename
-        self.barcode_column = barcode_column
+        self.column = column
 
     def read_barcodes(self):
         if self.filename.endswith(".fasta"):
@@ -182,23 +171,24 @@ class BarCodeLibraryReader:
         return barcodes
 
     def _read_tsv(self):
-        if self.barcode_column is None:
+        if self.column is None:
             raise ValueError("A barcode column must be specified for TSV files")
         barcodes = []
         with open(self.filename, "r") as file:
             reader = csv.reader(file, delimiter="\t")
             header = next(reader)
-            if self.barcode_column not in header:
-                raise ValueError(f"Column '{self.barcode_column}' not found in file")
-            barcode_index = header.index(self.barcode_column)
+            if self.column not in header:
+                raise ValueError(f"Column '{self.column}' not found in file")
+            barcode_index = header.index(self.column)
             for row in reader:
                 barcodes.append(row[barcode_index])
         return barcodes
 
 
 class BarCodeLibrary:
-    def __init__(self, filename=None):
+    def __init__(self, filename=None, **kwargs):
         self._barcodes = set()
+        self.kwargs = kwargs
         if filename is not None:
             self.load(filename)
 
@@ -216,7 +206,7 @@ class BarCodeLibrary:
         self._barcodes.remove(barcode)
 
     def load(self, filename):
-        reader = BarCodeLibraryReader(filename)
+        reader = BarCodeLibraryReader(filename, **self.kwargs)
         for sequence in reader.read_barcodes():
             self.add(sequence)
 
@@ -252,12 +242,12 @@ class BowtieRunner(LoggingBase):
         if self._fastq_path is None:
             self._fastq_path = self.index_path + ".fastq"
         return self._fastq_path
-    
+
     @property
     def sam_path(self):
         if self._sam_path is None:
             self._sam_path = self.index_path + ".sam"
-        return self._sam_path    
+        return self._sam_path
 
     def __enter__(self):
         return self
@@ -322,7 +312,7 @@ class BowtieRunner(LoggingBase):
             self.index_path,
             self.fastq_path,
             "-S",
-            self.sam_path
+            self.sam_path,
         ]
         try:
             subprocess.run(
@@ -345,97 +335,14 @@ class BowtieError(Exception):
         self.message = message
 
 
-bcl = BarCodeLibrary("A_E_coli.fasta")
-gbr = GenBankReader("GCA_000005845.2.gb")
-gbp = GenBankProcessor(gbr.records)
+bcl = BarCodeLibrary("Example_Libraries/unambiguous-20-NGG-eco.tsv", column="spacer")
+gbp = GenBankParser("GCA_000005845.2.gb")
 
 with BowtieRunner() as bowtie:
-    bowtie.write_fasta(gbr.records)
+    bowtie.write_fasta(gbp.records)
     bowtie.write_fastq(bcl.barcodes)
     bowtie.create_index()
     bowtie.align(3, 12)
-
-
-# def run_bowtie_and_parse(
-#     sgrna_fastq_file_name,
-#     topological_fasta_file_name,
-#     locus_map,
-#     num_mismatches,
-#     num_threads,
-# ):
-#     results = []
-#     # Create a temporary directory for the bowtie index files
-#     with tempfile.TemporaryDirectory() as temp_dir:
-#         # Create a temporary name for the genome index
-#         genome_index_temp_name = tempfile.NamedTemporaryFile(
-#             dir=temp_dir, delete=False
-#         ).name
-#         index_prefix = os.path.join(temp_dir, genome_index_temp_name)
-
-#         with open(os.devnull, "w") as devnull:
-
-#             bowtie_build_command = [
-#                 "bowtie-build",
-#                 topological_fasta_file_name,
-#                 index_prefix,
-#             ]
-
-#             bowtie_build_process = subprocess.Popen(
-#                 bowtie_build_command,
-#                 stdout=devnull,
-#                 stderr=devnull
-#             )
-#             bowtie_build_process.wait()
-
-#             # Create a temporary file for the bowtie output
-#             with tempfile.NamedTemporaryFile(delete=False) as bowtie_output_temp_file:
-
-#                 bowtie_command = [
-#                     "bowtie",
-#                     "-S",
-#                     "-k 100",
-#                     "--nomaqround",
-#                     "-p",
-#                     str(num_threads),
-#                     "--tryhard",
-#                     "-v",
-#                     str(num_mismatches),
-#                     "-x",
-#                     index_prefix,
-#                     sgrna_fastq_file_name,
-#                 ]
-
-#                 bowtie_process = subprocess.Popen(
-#                     bowtie_command,
-#                     stdout=subprocess.PIPE,
-#                     stderr=devnull,
-#                     universal_newlines=True
-#                 )
-
-#         if bowtie_process.stdout is None:
-#             raise RuntimeError("Bowtie was unable to start. Check your installation.")
-
-#         if bowtie_process.stdout is not None:
-#                 with pysam.AlignmentFile(bowtie_process.stdout, "r") as samfile:
-#                     results = parse_sam_output(
-#                         samfile,
-#                         locus_map,
-#                         topological_fasta_file_name,
-#                         args.genome_file,
-#                         args.pam,
-#                         args.pam_direction,
-#                     )
-
-#                 bowtie_process.wait()
-
-#                 # Delete the temporary file after we're done with it
-#                 os.remove(bowtie_output_temp_file.name)
-
-#     # Return the results of parse_sam_output
-#     if results is []:
-#         raise RuntimeError("No results were returned from the Bowtie process. Check your input files and parameters.")
-#     else:
-#         return results
 
 
 # read example_ranges.tsv as a pandas dataframe and convert to a list of tuples
