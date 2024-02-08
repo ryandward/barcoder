@@ -61,7 +61,8 @@ class GenBankReader:
 # Class to process GenBank files
 class GenBankParser:
     def __init__(self, filename):
-        self.records = GenBankReader(filename).records
+        self.reader = GenBankReader(filename)
+        self.records = self.reader.records
 
     @property
     @lru_cache(maxsize=None)
@@ -190,7 +191,8 @@ class BarCodeLibrary:
         self._barcodes = set()
         self.kwargs = kwargs
         if filename is not None:
-            self.load(filename)
+            self.reader = BarCodeLibraryReader(filename, **self.kwargs)
+            self.load()
 
     @property
     @lru_cache(maxsize=None)
@@ -205,16 +207,14 @@ class BarCodeLibrary:
         barcode = sequence
         self._barcodes.remove(barcode)
 
-    def load(self, filename):
-        reader = BarCodeLibraryReader(filename, **self.kwargs)
-        for sequence in reader.read_barcodes():
+    def load(self):
+        for sequence in self.reader.read_barcodes():
             self.add(sequence)
 
     @property
     @lru_cache(maxsize=None)
     def size(self):
         return len(self._barcodes)
-
 
 class BowtieRunner(LoggingBase):
     def __init__(self):
