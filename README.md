@@ -31,7 +31,7 @@ with BowtieRunner() as bowtie:
       "end": 1952807,
       "sequence": "GGATATGATCCAGCGTTCCG",
       "is_reverse": true,
-      "mis_matches": 0
+      "mismatches": 0
     },
     "feature": {
       "chromosome": "U00096.3",
@@ -49,7 +49,7 @@ with BowtieRunner() as bowtie:
       "end": 1952779,
       "sequence": "TTGATGAACGGGTAGCTGAA",
       "is_reverse": true,
-      "mis_matches": 0
+      "mismatches": 0
     },
     "feature": {
       "chromosome": "U00096.3",
