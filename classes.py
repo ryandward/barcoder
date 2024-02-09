@@ -7,9 +7,11 @@ import csv
 import json
 import logging
 import os
-import select
+import re
 import subprocess
+import sys
 import tempfile
+from textwrap import indent
 from tracemalloc import start
 
 # Related third party imports
@@ -24,28 +26,39 @@ import pysam
 from rich.console import Console
 from rich.logging import RichHandler
 
-# Configure logging
-logging.basicConfig(
-    level="NOTSET", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()]
-)
+os.environ["TMPDIR"] = "/tmp/ramdisk"
 
 
-# Create a base class for logging
 class LoggingBase:
     def __init__(self):
-        self.console = Console()
+        logging.basicConfig(
+            level=logging.NOTSET,
+            format="%(message)s",
+            datefmt="[%X]",
+            handlers=[RichHandler(console=Console(stderr=True))],
+        )
+        self.logger = logging.getLogger("rich")
 
-    @staticmethod
-    def logged_property(func):
-        @property
-        @wraps(func)
-        def wrapper(self):
-            self.console.log(
-                f"{self.__class__.__name__} is creating '{func.__name__}'..."
-            )
-            return func(self)
+    def format_numbers(self, message):
+        if isinstance(message, str):
+            # Find all standalone numbers in the string
+            numbers = re.findall(r"\b\d+\b", message)
+            # Replace each number with its formatted version
+            for number in numbers:
+                formatted_number = f"{int(number):,}"
+                message = message.replace(number, formatted_number)
+        elif isinstance(message, int):
+            # Format the number with commas as thousand separators
+            message = f"{message:,}"
+        return message
 
-        return wrapper
+    def info(self, message):
+        message = self.format_numbers(message)
+        self.logger.info(message)
+
+    def warn(self, message):
+        message = self.format_numbers(message)
+        self.logger.warning(message)
 
 
 class GenBankReader:
@@ -56,6 +69,18 @@ class GenBankReader:
     @lru_cache(maxsize=None)
     def records(self):
         return SeqIO.index(self.filename, "genbank")
+
+
+class ReadInterval(Interval):
+    @property
+    def read(self):
+        return self.data
+
+
+class FeatureInterval(Interval):
+    @property
+    def feature(self):
+        return self.data
 
 
 # Class to process GenBank files
@@ -103,14 +128,10 @@ class GenBankParser:
 
     @property
     @lru_cache(maxsize=None)
-    def locus_tree(self):
+    def trees(self):
+        trees = defaultdict(IntervalTree)
 
-        locus_tree = IntervalTree()
-
-        for (
-            id,
-            record,
-        ) in self.records.items():
+        for id, record in self.records.items():
             for feature in record.features:
                 # Check if the feature location is a CompoundLocation
                 if isinstance(feature.location, CompoundLocation):
@@ -124,20 +145,13 @@ class GenBankParser:
                 for location in locations:
                     start = int(location.start)
                     end = int(location.end)
-                    interval = Interval(
-                        start,
-                        end,
-                        {
-                            "id": id,
-                            "feature": feature,  # Store the entire SeqFeature object
-                            "sequence": record.seq[start:end],
-                            # "strand": feature.location.strand,
-                            # "feature_type": feature.type,  # Include the feature type
-                        },
-                    )
-                    locus_tree.add(interval)
+                    # Create an Interval object for the feature
+                    # Pack the entire feature object into the interval's data attribute
+                    interval = FeatureInterval(start, end, data=feature)
 
-        return locus_tree
+                    trees[id].add(interval)
+
+        return trees
 
     def write_fasta(self, filename):
         # Write the records to a FASTA file
@@ -147,8 +161,8 @@ class GenBankParser:
 
 class BarCode:
     def __init__(self, sequence: Seq):
-        if not isinstance(sequence, Seq):
-            raise ValueError("sequence must be a Seq object")
+        # if not isinstance(sequence, Seq):
+        #     raise ValueError("sequence must be a Seq object")
         self.sequence = sequence
 
 
@@ -186,8 +200,9 @@ class BarCodeLibraryReader:
         return barcodes
 
 
-class BarCodeLibrary:
+class BarCodeLibrary(LoggingBase):
     def __init__(self, filename=None, **kwargs):
+        super().__init__()
         self._barcodes = set()
         self.kwargs = kwargs
         if filename is not None:
@@ -208,13 +223,20 @@ class BarCodeLibrary:
         self._barcodes.remove(barcode)
 
     def load(self):
-        for sequence in self.reader.read_barcodes():
-            self.add(sequence)
+        try:
+            for sequence in self.reader.read_barcodes():
+                self.add(sequence)
+            self.info(
+                f"Loaded {self.size} barcodes from {os.path.abspath(self.reader.filename)} ..."
+            )
+        except Exception as e:
+            raise BarCodeLibraryError("Failed to load barcodes") from e
 
     @property
     @lru_cache(maxsize=None)
     def size(self):
         return len(self._barcodes)
+
 
 class BowtieRunner(LoggingBase):
     def __init__(self):
@@ -257,7 +279,7 @@ class BowtieRunner(LoggingBase):
 
     def write_fasta(self, records):
         # Write the records to a FASTA file
-        self.console.log(f"Writing FASTA file {self.fasta_path}...")
+        self.info(f"Writing FASTA file {self.fasta_path} ...")
         try:
             with open(self.fasta_path, "w") as fasta_file:
                 SeqIO.write(records.values(), fasta_file, "fasta")
@@ -265,7 +287,7 @@ class BowtieRunner(LoggingBase):
             raise BowtieError("Failed to write FASTA file") from e
 
     def write_fastq(self, barcodes):
-        self.console.log(f"Writing FASTQ file {self.fastq_path}...")
+        self.info(f"Writing FASTQ file {self.fastq_path} ...")
         try:
             with open(self.fastq_path, "a") as output_handle:
                 for barcode in barcodes:
@@ -284,7 +306,7 @@ class BowtieRunner(LoggingBase):
 
         bowtie_build_command = ["bowtie-build", self.fasta_path, self.index_path]
 
-        self.console.log(f"Creating Bowtie index {bowtie_build_command}...")
+        self.info(f"Creating Bowtie index {bowtie_build_command} ...")
 
         try:
             subprocess.run(
@@ -293,11 +315,11 @@ class BowtieRunner(LoggingBase):
                 stderr=subprocess.DEVNULL,
                 check=True,
             )
-            self.console.log("Bowtie index created successfully.")
+            self.info("Bowtie index created successfully.")
         except subprocess.CalledProcessError as e:
             raise BowtieError("Bowtie failed to index.") from e
 
-    def align(self, num_mismatches=0, num_threads=1):
+    def align(self, num_mismatches=0, num_threads=os.cpu_count()):
         bowtie_align_command = [
             "bowtie",
             "-S",
@@ -321,9 +343,31 @@ class BowtieRunner(LoggingBase):
                 stderr=subprocess.DEVNULL,
                 check=True,
             )
-            self.console.log("Bowtie alignment complete.")
+            self.info("Bowtie alignment complete.")
         except subprocess.CalledProcessError as e:
             raise BowtieError("Bowtie failed to align.") from e
+
+
+class PySamParser:
+    def __init__(self, filename):
+        self.filename = filename
+
+    def read_sam(self):
+        with pysam.AlignmentFile(self.filename, "r") as samfile:
+            for read in samfile:
+                yield read
+
+    @property
+    @lru_cache(maxsize=None)
+    def trees(self):
+        trees = defaultdict(IntervalTree)
+        for read in self.read_sam():
+            # Get the IntervalTree for this read's reference_name
+            tree = trees[read.reference_name]
+            # Add an interval to the tree with the read's start and end positions
+            # and pack the entire read object into the interval's data attribute
+            tree.add(Interval(read.reference_start, read.reference_end, data=read))
+        return trees
 
 
 class BowtieError(Exception):
@@ -335,35 +379,81 @@ class BowtieError(Exception):
         self.message = message
 
 
-bcl = BarCodeLibrary("Example_Libraries/unambiguous-20-NGG-eco.tsv", column="spacer")
-gbp = GenBankParser("GCA_000005845.2.gb")
+class BarCodeLibraryError(Exception):
+    """Exception raised for errors in the BowtieRunner.
+    Attributes: message -- explanation of the error
+    """
+
+    def __init__(self, message):
+        self.message = message
+
+
+def find_overlaps(PySamParser, GenBankParser):
+    overlaps = []
+    for chromosome, feature_tree in GenBankParser.trees.items():
+        read_tree = PySamParser.trees.get(chromosome)
+        if read_tree is None:
+            continue
+        for feature_interval in feature_tree:
+            overlapping_intervals = read_tree[
+                feature_interval.begin : feature_interval.end
+            ]
+            for overlap in overlapping_intervals:
+                feature = (
+                    feature_interval.data
+                )  # This is the feature from GenBankParser
+                read = overlap.data
+                gene_name = (
+                    feature.qualifiers.get("gene")[0]
+                    if "gene" in feature.qualifiers
+                    else None
+                )
+                locus_tag = (
+                    feature.qualifiers.get("locus_tag")[0]
+                    if "locus_tag" in feature.qualifiers
+                    else None
+                )
+                overlaps.append(
+                    {
+                        "read": {
+                            "chromosome": chromosome,
+                            "start": read.reference_start,
+                            "end": read.reference_end,
+                            "sequence": read.query_sequence,
+                            "is_reverse": read.is_reverse,
+                            "mis_matches": (
+                                read.get_tag("NM") if read.has_tag("NM") else "0"
+                            ),
+                        },
+                        "feature": {
+                            "chromosome": chromosome,
+                            "start": int(feature.location.start),
+                            "end": int(feature.location.end),
+                            "locus_tag": locus_tag,
+                            "gene_name": gene_name,
+                            "strand": feature.location.strand,
+                        },
+                    }
+                )
+    return overlaps
+
+
+barcodes = BarCodeLibrary(
+    "Example_Libraries/unambiguous-20-NGG-eco.tsv", column="spacer"
+)
+genbank = GenBankParser("GCA_000005845.2.gb")
 
 with BowtieRunner() as bowtie:
-    bowtie.write_fasta(gbp.records)
-    bowtie.write_fastq(bcl.barcodes)
+    bowtie.write_fasta(genbank.records)
+
+    bowtie.write_fastq(barcodes.barcodes)
+
     bowtie.create_index()
-    bowtie.align(3, 12)
 
+    bowtie.align(num_mismatches=1, num_threads=12)
 
-# read example_ranges.tsv as a pandas dataframe and convert to a list of tuples
+    sam = PySamParser(bowtie.sam_path)
 
-# ranges = pd.read_csv("example_ranges.tsv", sep="\t")
+    overlaps = find_overlaps(sam, genbank)
 
-# print(ranges)
-
-# ranges = [tuple(x) for x in ranges.values]
-
-# for start, end in ranges:
-#     overlapping_intervals = gbp.locus_tree.overlap(start, end)
-#     for interval in overlapping_intervals:
-#         feature = interval.data["feature"]
-#         if isinstance(feature.location, Bio.SeqFeature.CompoundLocation):
-#             print(f"Query range: {start}-{end}")
-#             print(f"Overlapping interval: {interval}")
-#             print(f"Feature type: {interval.data['feature'].type}")
-#             print(f"Qualifiers: {interval.data['feature'].qualifiers}")
-#             print()
-
-# Assuming gbp.fastas is a dictionary of sequences
-
-# Run bowtie and parse the output using parse_sam_output and temp files
+    print(json.dumps(overlaps, indent=4))
