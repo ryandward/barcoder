@@ -8,7 +8,7 @@ A toolkit for genome-scale experiments
 
 #  First pass at creating a simple approach for guide design in a CRISPR-flavored experiment.
 ```python
-barcodes = BarCodeLibrary(E_coli_library.tsv", column="spacer")
+barcodes = BarCodeLibrary("E_coli_library.tsv", column="spacer")
 genbank = GenBankParser("GCA_000005845.2.gb")
 
 with BowtieRunner() as bowtie:
