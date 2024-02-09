@@ -421,7 +421,7 @@ def find_overlaps(PySamParser, GenBankParser):
                             "end": read.reference_end,
                             "sequence": read.query_sequence,
                             "is_reverse": read.is_reverse,
-                            "mis_matches": (
+                            "mismatches": (
                                 read.get_tag("NM") if read.has_tag("NM") else "0"
                             ),
                         },
