@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,12 +25,13 @@ from intervaltree import Interval, IntervalTree
 import pandas as pd
 import pysam
 from rich.console import Console
+from rich.highlighter import JSONHighlighter
 from rich.logging import RichHandler
 
 os.environ["TMPDIR"] = "/tmp/ramdisk"
 
 
-class LoggingBase:
+class Logger:
     def __init__(self):
         logging.basicConfig(
             level=logging.NOTSET,
@@ -60,6 +62,10 @@ class LoggingBase:
         message = self.format_numbers(message)
         self.logger.warning(message)
 
+    def json(self, data):
+        json_str = json.dumps(data, indent=4)
+        self.logger.info(json_str, extra={"highlighter": JSONHighlighter()})
+
 
 class GenBankReader:
     def __init__(self, filename):
@@ -84,10 +90,14 @@ class FeatureInterval(Interval):
 
 
 # Class to process GenBank files
-class GenBankParser:
+class GenBankParser(Logger):
     def __init__(self, filename):
+        super().__init__()
         self.reader = GenBankReader(filename)
         self.records = self.reader.records
+        # info organisms found
+        self.info(f"Found the following records:")
+        self.json(self.organisms)
 
     @property
     @lru_cache(maxsize=None)
@@ -200,7 +210,7 @@ class BarCodeLibraryReader:
         return barcodes
 
 
-class BarCodeLibrary(LoggingBase):
+class BarCodeLibrary(Logger):
     def __init__(self, filename=None, **kwargs):
         super().__init__()
         self._barcodes = set()
@@ -238,7 +248,7 @@ class BarCodeLibrary(LoggingBase):
         return len(self._barcodes)
 
 
-class BowtieRunner(LoggingBase):
+class BowtieRunner(Logger):
     def __init__(self):
         super().__init__()
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -304,9 +314,14 @@ class BowtieRunner(LoggingBase):
         if not os.path.exists(self.fasta_path) or os.path.getsize(self.fasta_path) == 0:
             raise BowtieError("BowtieRunner.fasta_path does not exist or is an empty")
 
-        bowtie_build_command = ["bowtie-build", self.fasta_path, self.index_path]
+        try:
+            bowtie_build_path = shutil.which("bowtie-build")
+        except subprocess.CalledProcessError as e:
+            raise BowtieError("Bowtie not found in PATH") from e
 
-        self.info(f"Creating Bowtie index {bowtie_build_command} ...")
+        bowtie_build_command = ["bowtie-build", self.fasta_path, self.index_path]
+        self.info(f"Creating index using {bowtie_build_path} ...")
+        self.json(bowtie_build_command)
 
         try:
             subprocess.run(
@@ -315,11 +330,18 @@ class BowtieRunner(LoggingBase):
                 stderr=subprocess.DEVNULL,
                 check=True,
             )
-            self.info("Bowtie index created successfully.")
+            self.info("Index created successfully.")
+
         except subprocess.CalledProcessError as e:
-            raise BowtieError("Bowtie failed to index.") from e
+            raise BowtieError("Failed to index.") from e
 
     def align(self, num_mismatches=0, num_threads=os.cpu_count()):
+
+        try:
+            bowtie_path = shutil.which("bowtie")
+        except subprocess.CalledProcessError as e:
+            raise BowtieError("Bowtie not found in PATH") from e
+
         bowtie_align_command = [
             "bowtie",
             "-S",
@@ -336,6 +358,10 @@ class BowtieRunner(LoggingBase):
             "-S",
             self.sam_path,
         ]
+
+        self.info(f"Performing alignment using {bowtie_path} ...")
+        self.json(bowtie_align_command)
+
         try:
             subprocess.run(
                 bowtie_align_command,
@@ -343,7 +369,8 @@ class BowtieRunner(LoggingBase):
                 stderr=subprocess.DEVNULL,
                 check=True,
             )
-            self.info("Bowtie alignment complete.")
+            self.info("Alignment complete.")
+
         except subprocess.CalledProcessError as e:
             raise BowtieError("Bowtie failed to align.") from e
 
@@ -368,6 +395,38 @@ class PySamParser:
             # and pack the entire read object into the interval's data attribute
             tree.add(Interval(read.reference_start, read.reference_end, data=read))
         return trees
+
+
+class Overlap:
+    def __init__(self, read_interval: ReadInterval, feature_interval: FeatureInterval):
+        if not isinstance(read_interval, ReadInterval):
+            raise TypeError("read_interval must be an instance of ReadInterval")
+        if not isinstance(feature_interval, FeatureInterval):
+            raise TypeError("feature_interval must be an instance of FeatureInterval")
+        self.read_interval = read_interval
+        self.feature_interval = feature_interval
+
+    @property
+    def read(self):
+        return self.read_interval.read
+
+    @property
+    def feature(self):
+        return self.feature_interval.feature
+
+
+class Overlaps:
+    def __init__(self, overlaps):
+        self.overlaps = [Overlap(read, feature) for read, feature in overlaps]
+
+    def filter_by_gene_name(self, gene_name):
+        return Overlaps(
+            [
+                overlap
+                for overlap in self.overlaps
+                if overlap.feature["gene_name"] == gene_name
+            ]
+        )
 
 
 class BowtieError(Exception):
@@ -429,19 +488,28 @@ def find_overlaps(PySamParser, GenBankParser):
                             "chromosome": chromosome,
                             "start": int(feature.location.start),
                             "end": int(feature.location.end),
+                            "type": feature.type,
                             "locus_tag": locus_tag,
                             "gene_name": gene_name,
                             "strand": feature.location.strand,
+                        },
+                        "match": {
+                            # Set orientation to 'with' if read and feature are both in the same direction
+                            "orientation": (
+                                "sense"
+                                if (read.is_reverse == (feature.location.strand == -1))
+                                else "antisense"
+                            ),
+                            "offset": overlap.begin - feature_interval.begin,
+                            "overlap": overlap.end - overlap.begin,
                         },
                     }
                 )
     return overlaps
 
 
-barcodes = BarCodeLibrary(
-    "Example_Libraries/unambiguous-20-NGG-eco.tsv", column="spacer"
-)
-genbank = GenBankParser("GCA_000005845.2.gb")
+barcodes = BarCodeLibrary("Example_Libraries/CN-32-zmo.tsv", column="spacer")
+genbank = GenBankParser("GCA_003054575.1.gb")
 
 with BowtieRunner() as bowtie:
     bowtie.write_fasta(genbank.records)
