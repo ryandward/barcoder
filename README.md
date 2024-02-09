@@ -27,42 +27,54 @@ with BowtieRunner() as bowtie:
    {
       "matches":"thousands of matches"
    },
-   {
-      "read":{
-         "chromosome":"U00096.3",
-         "start":1952787,
-         "end":1952807,
-         "sequence":"GGATATGATCCAGCGTTCCG",
-         "is_reverse":true,
-         "mismatches":0
-      },
-      "feature":{
-         "chromosome":"U00096.3",
-         "start":1952701,
-         "end":1953445,
-         "locus_tag":"b1870",
-         "gene_name":"cmoA",
-         "strand":1
-      }
-   },
-   {
-      "read":{
-         "chromosome":"U00096.3",
-         "start":1952759,
-         "end":1952779,
-         "sequence":"TTGATGAACGGGTAGCTGAA",
-         "is_reverse":true,
-         "mismatches":0
-      },
-      "feature":{
-         "chromosome":"U00096.3",
-         "start":1952701,
-         "end":1953445,
-         "locus_tag":"b1870",
-         "gene_name":"cmoA",
-         "strand":1
-      }
-   },
+    {
+        "read": {
+            "chromosome": "CP023719.1",
+            "start": 21912,
+            "end": 21944,
+            "sequence": "ATTGTTGAAGCTTTGGCTATTCATACTGATCA",
+            "is_reverse": false,
+            "mismatches": 0
+        },
+        "feature": {
+            "chromosome": "CP023719.1",
+            "start": 21894,
+            "end": 22275,
+            "type": "gene",
+            "locus_tag": "ZMO1_ZMOp39x021",
+            "gene_name": null,
+            "strand": 1
+        },
+        "match": {
+            "orientation": "sense",
+            "offset": 18,
+            "overlap": 32
+        }
+    },
+    {
+        "read": {
+            "chromosome": "CP023719.1",
+            "start": 22024,
+            "end": 22056,
+            "sequence": "ATTATAACGATCTTATACAAGAATCTGCTGCA",
+            "is_reverse": false,
+            "mismatches": 0
+        },
+        "feature": {
+            "chromosome": "CP023719.1",
+            "start": 21894,
+            "end": 22275,
+            "type": "gene",
+            "locus_tag": "ZMO1_ZMOp39x021",
+            "gene_name": null,
+            "strand": 1
+        },
+        "match": {
+            "orientation": "sense",
+            "offset": 130,
+            "overlap": 32
+        }
+    },
    {
       "matches":"thousands more matches"
    }
