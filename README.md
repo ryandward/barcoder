@@ -23,42 +23,48 @@ with BowtieRunner() as bowtie:
 
 ```
   ```json
- [
-    {
-    "read": {
-      "chromosome": "U00096.3",
-      "start": 1952787,
-      "end": 1952807,
-      "sequence": "GGATATGATCCAGCGTTCCG",
-      "is_reverse": true,
-      "mismatches": 0
-    },
-    "feature": {
-      "chromosome": "U00096.3",
-      "start": 1952701,
-      "end": 1953445,
-      "locus_tag": "b1870",
-      "gene_name": "cmoA",
-      "strand": 1
-    }
-  },
-  {
-    "read": {
-      "chromosome": "U00096.3",
-      "start": 1952759,
-      "end": 1952779,
-      "sequence": "TTGATGAACGGGTAGCTGAA",
-      "is_reverse": true,
-      "mismatches": 0
-    },
-    "feature": {
-      "chromosome": "U00096.3",
-      "start": 1952701,
-      "end": 1953445,
-      "locus_tag": "b1870",
-      "gene_name": "cmoA",
-      "strand": 1
-    }
-  }
+[
+   {
+      "matches":"thousands of matches"
+   },
+   {
+      "read":{
+         "chromosome":"U00096.3",
+         "start":1952787,
+         "end":1952807,
+         "sequence":"GGATATGATCCAGCGTTCCG",
+         "is_reverse":true,
+         "mismatches":0
+      },
+      "feature":{
+         "chromosome":"U00096.3",
+         "start":1952701,
+         "end":1953445,
+         "locus_tag":"b1870",
+         "gene_name":"cmoA",
+         "strand":1
+      }
+   },
+   {
+      "read":{
+         "chromosome":"U00096.3",
+         "start":1952759,
+         "end":1952779,
+         "sequence":"TTGATGAACGGGTAGCTGAA",
+         "is_reverse":true,
+         "mismatches":0
+      },
+      "feature":{
+         "chromosome":"U00096.3",
+         "start":1952701,
+         "end":1953445,
+         "locus_tag":"b1870",
+         "gene_name":"cmoA",
+         "strand":1
+      }
+   },
+   {
+      "matches":"thousands more matches"
+   }
 ]
   ```
