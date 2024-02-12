@@ -1,57 +1,74 @@
 # Standard library imports
-from collections import defaultdict
+from calendar import c
 from functools import lru_cache, wraps
-from itertools import islice
-from math import e
 import csv
+import locale
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
-from textwrap import indent
-from tracemalloc import start
 
 # Related third party imports
+from babel.numbers import format_decimal
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqFeature import CompoundLocation
 from Bio.SeqRecord import SeqRecord
-import Bio.SeqFeature
-from intervaltree import Interval, IntervalTree
+from numpy import std
 import pandas as pd
+import pyranges as pr
 import pysam
 from rich.console import Console
 from rich.highlighter import JSONHighlighter
 from rich.logging import RichHandler
+from rich.theme import Theme
 
-os.environ["TMPDIR"] = "/tmp/ramdisk"
+
+user_locale = locale.getdefaultlocale()[0]  # Get the user's locale
 
 
 class Logger:
+
+    SUBPROC = 25  # Between INFO (20) and WARNING (30)
+
     def __init__(self):
+        console = Console(
+            stderr=True, theme=Theme({"logging.level.subproc": "bold blue"})
+        )
+
         logging.basicConfig(
             level=logging.NOTSET,
             format="%(message)s",
             datefmt="[%X]",
-            handlers=[RichHandler(console=Console(stderr=True))],
+            handlers=[RichHandler(console=console)],
         )
         self.logger = logging.getLogger("rich")
+        logging.addLevelName(self.SUBPROC, "SUBPROC")
 
     def format_numbers(self, message):
+
         if isinstance(message, str):
-            # Find all standalone numbers in the string
-            numbers = re.findall(r"\b\d+\b", message)
-            # Replace each number with its formatted version
-            for number in numbers:
-                formatted_number = f"{int(number):,}"
-                message = message.replace(number, formatted_number)
+            lines = message.splitlines()
+            for i, line in enumerate(lines):
+                words = line.split()
+                for j, word in enumerate(words):
+                    try:
+                        # Try to convert the word to a float
+                        num = float(word)
+                        # If successful, format the number and replace the word
+                        words[j] = format_decimal(num, locale=user_locale)
+                    except ValueError:
+                        # If the word can't be converted to a float, ignore it
+                        pass
+                # Join the words back into a single string
+                lines[i] = " ".join(words)
+            # Join the lines back into a single string
+            message = "\n".join(lines)
         elif isinstance(message, int):
-            # Format the number with commas as thousand separators
-            message = f"{message:,}"
+            message = format_decimal(message, locale=user_locale)
         return message
 
     def info(self, message):
@@ -61,6 +78,13 @@ class Logger:
     def warn(self, message):
         message = self.format_numbers(message)
         self.logger.warning(message)
+
+    def subproc(self, message, *args, **kwargs):
+        message = self.format_numbers(message)
+        if not message:  # Check if the message is empty
+            message = "No errors reported"
+        if self.logger.isEnabledFor(self.SUBPROC):
+            self.logger._log(self.SUBPROC, message, args, **kwargs)
 
     def json(self, data):
         json_str = json.dumps(data, indent=4)
@@ -74,28 +98,15 @@ class GenBankReader:
     @property
     @lru_cache(maxsize=None)
     def records(self):
-        return SeqIO.index(self.filename, "genbank")
+        with open(self.filename, "r") as handle:
+            return SeqIO.to_dict(SeqIO.parse(handle, "genbank"))
 
 
-class ReadInterval(Interval):
-    @property
-    def read(self):
-        return self.data
-
-
-class FeatureInterval(Interval):
-    @property
-    def feature(self):
-        return self.data
-
-
-# Class to process GenBank files
 class GenBankParser(Logger):
     def __init__(self, filename):
         super().__init__()
         self.reader = GenBankReader(filename)
         self.records = self.reader.records
-        # info organisms found
         self.info(f"Found the following records:")
         self.json(self.organisms)
 
@@ -138,11 +149,13 @@ class GenBankParser(Logger):
 
     @property
     @lru_cache(maxsize=None)
-    def trees(self):
-        trees = defaultdict(IntervalTree)
+    def ranges(self):
+        data = []
 
         for id, record in self.records.items():
             for feature in record.features:
+                if feature.type not in ["source", "gene"]:
+                    continue
                 # Check if the feature location is a CompoundLocation
                 if isinstance(feature.location, CompoundLocation):
                     # If so, use the parts of the location
@@ -151,28 +164,71 @@ class GenBankParser(Logger):
                     # If not, use the location itself
                     locations = [feature.location]
 
-                # Iterate over the locations
                 for location in locations:
                     start = int(location.start)
                     end = int(location.end)
-                    # Create an Interval object for the feature
-                    # Pack the entire feature object into the interval's data attribute
-                    interval = FeatureInterval(start, end, data=feature)
+                    strand = location.strand
 
-                    trees[id].add(interval)
+                    interval_dict = {
+                        "Chromosome": id,
+                        "Start": start,
+                        "End": end,
+                        "Strand": "+" if strand == 1 else "-" if strand == -1 else ".",
+                        "Locus_Tag": feature.qualifiers.get("locus_tag", [None])[0],
+                        "Gene": feature.qualifiers.get("gene", [None])[0],
+                        "Type": feature.type,
+                    }
 
-        return trees
+                    data.append(interval_dict)
 
-    def write_fasta(self, filename):
+        df = pd.DataFrame(data)
+        ranges = pr.PyRanges(df)
+        return ranges
+
+    def make_fasta(self, filename):
         # Write the records to a FASTA file
         with open(filename, "w") as fasta_file:
             SeqIO.write(self.records.values(), fasta_file, "fasta")
 
+    def get_pam_sequence(self, row, pam_length, direction):
+        # Fetch the sequence for the range
+        sequence = self.records[row.Chromosome].seq[row.Start : row.End]
+
+        # If the strand is "-", get the reverse complement of the sequence
+        if row.Strand == "-":
+            sequence = sequence.reverse_complement()
+
+        # Get the PAM sequence
+        if direction == "upstream":
+            if row.Strand == "+":
+                pam_sequence = self.records[row.Chromosome].seq[
+                    row.Start - pam_length : row.Start
+                ]
+            else:
+                pam_sequence = self.records[row.Chromosome].seq[
+                    row.End : row.End + pam_length
+                ]
+        elif direction == "downstream":
+            if row.Strand == "+":
+                pam_sequence = self.records[row.Chromosome].seq[
+                    row.End : row.End + pam_length
+                ]
+            else:
+                pam_sequence = self.records[row.Chromosome].seq[
+                    row.Start - pam_length : row.Start
+                ]
+        else:
+            raise ValueError("direction must be 'upstream' or 'downstream'")
+
+        # If the strand is "-", get the reverse complement of the PAM sequence
+        if row.Strand == "-":
+            pam_sequence = pam_sequence.reverse_complement()
+
+        return str(pam_sequence)
+
 
 class BarCode:
     def __init__(self, sequence: Seq):
-        # if not isinstance(sequence, Seq):
-        #     raise ValueError("sequence must be a Seq object")
         self.sequence = sequence
 
 
@@ -233,6 +289,9 @@ class BarCodeLibrary(Logger):
         self._barcodes.remove(barcode)
 
     def load(self):
+        self.warn(
+            "Genome circularity is not yet implemented. Barcodes spanning the origin will be missed!"
+        )
         try:
             for sequence in self.reader.read_barcodes():
                 self.add(sequence)
@@ -287,7 +346,7 @@ class BowtieRunner(Logger):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.temp_dir.cleanup()
 
-    def write_fasta(self, records):
+    def make_fasta(self, records):
         # Write the records to a FASTA file
         self.info(f"Writing FASTA file {self.fasta_path} ...")
         try:
@@ -296,7 +355,7 @@ class BowtieRunner(Logger):
         except Exception as e:
             raise BowtieError("Failed to write FASTA file") from e
 
-    def write_fastq(self, barcodes):
+    def make_fastq(self, barcodes):
         self.info(f"Writing FASTQ file {self.fastq_path} ...")
         try:
             with open(self.fastq_path, "a") as output_handle:
@@ -324,16 +383,17 @@ class BowtieRunner(Logger):
         self.json(bowtie_build_command)
 
         try:
-            subprocess.run(
+            bowtie_build_complete = subprocess.run(
                 bowtie_build_command,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 check=True,
             )
-            self.info("Index created successfully.")
+            self.subproc(f"{bowtie_build_path} reporting:")
+            self.subproc(bowtie_build_complete.stderr.decode("utf-8"))
 
         except subprocess.CalledProcessError as e:
-            raise BowtieError("Failed to index.") from e
+            raise BowtieError("Failed to index") from e
 
     def align(self, num_mismatches=0, num_threads=os.cpu_count()):
 
@@ -345,17 +405,16 @@ class BowtieRunner(Logger):
         bowtie_align_command = [
             "bowtie",
             "-S",
-            "-k 100",
+            "-a",
             "--nomaqround",
-            "-p",
-            str(num_threads),
+            "--mm",
             "--tryhard",
-            "-v",
-            str(num_mismatches),
-            "-x",
-            self.index_path,
+            "--quiet",
+            "--best",
+            f"-p{str(num_threads)}",
+            f"-v{str(num_mismatches)}",
+            f"-x{self.index_path}",
             self.fastq_path,
-            "-S",
             self.sam_path,
         ]
 
@@ -363,16 +422,17 @@ class BowtieRunner(Logger):
         self.json(bowtie_align_command)
 
         try:
-            subprocess.run(
+            bowtie_complete = subprocess.run(
                 bowtie_align_command,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 check=True,
             )
-            self.info("Alignment complete.")
+            self.subproc(f"{bowtie_path} reporting:")
+            self.subproc(bowtie_complete.stderr.decode("utf-8"))
 
         except subprocess.CalledProcessError as e:
-            raise BowtieError("Bowtie failed to align.") from e
+            raise BowtieError(f"{bowtie_path} failed") from e
 
 
 class PySamParser:
@@ -386,47 +446,30 @@ class PySamParser:
 
     @property
     @lru_cache(maxsize=None)
-    def trees(self):
-        trees = defaultdict(IntervalTree)
+    def ranges(self):
+        data = []
+
         for read in self.read_sam():
-            # Get the IntervalTree for this read's reference_name
-            tree = trees[read.reference_name]
-            # Add an interval to the tree with the read's start and end positions
-            # and pack the entire read object into the interval's data attribute
-            tree.add(Interval(read.reference_start, read.reference_end, data=read))
-        return trees
 
+            interval_dict = {
+                "Chromosome": read.reference_name,
+                "Start": read.reference_start,
+                "End": read.reference_end,
+                "Mapped": True if not read.is_unmapped else False,
+                "Strand": (
+                    "+"
+                    if read.is_reverse == 0
+                    else "-" if read.is_reverse == 1 else "."
+                ),
+                "Barcode": read.query_sequence,
+                "Mismatches": (read.get_tag("NM") if read.has_tag("NM") else "0"),
+            }
 
-class Overlap:
-    def __init__(self, read_interval: ReadInterval, feature_interval: FeatureInterval):
-        if not isinstance(read_interval, ReadInterval):
-            raise TypeError("read_interval must be an instance of ReadInterval")
-        if not isinstance(feature_interval, FeatureInterval):
-            raise TypeError("feature_interval must be an instance of FeatureInterval")
-        self.read_interval = read_interval
-        self.feature_interval = feature_interval
+            data.append(interval_dict)
 
-    @property
-    def read(self):
-        return self.read_interval.read
-
-    @property
-    def feature(self):
-        return self.feature_interval.feature
-
-
-class Overlaps:
-    def __init__(self, overlaps):
-        self.overlaps = [Overlap(read, feature) for read, feature in overlaps]
-
-    def filter_by_gene_name(self, gene_name):
-        return Overlaps(
-            [
-                overlap
-                for overlap in self.overlaps
-                if overlap.feature["gene_name"] == gene_name
-            ]
-        )
+        df = pd.DataFrame(data)
+        ranges = pr.PyRanges(df)
+        return ranges
 
 
 class BowtieError(Exception):
@@ -439,7 +482,7 @@ class BowtieError(Exception):
 
 
 class BarCodeLibraryError(Exception):
-    """Exception raised for errors in the BowtieRunner.
+    """Exception raised for errors in the BarCodeLibrary.
     Attributes: message -- explanation of the error
     """
 
@@ -447,81 +490,58 @@ class BarCodeLibraryError(Exception):
         self.message = message
 
 
-def find_overlaps(PySamParser, GenBankParser):
-    overlaps = []
-    for chromosome, feature_tree in GenBankParser.trees.items():
-        read_tree = PySamParser.trees.get(chromosome)
-        if read_tree is None:
-            continue
-        for feature_interval in feature_tree:
-            overlapping_intervals = read_tree[
-                feature_interval.begin : feature_interval.end
-            ]
-            for overlap in overlapping_intervals:
-                feature = (
-                    feature_interval.data
-                )  # This is the feature from GenBankParser
-                read = overlap.data
-                gene_name = (
-                    feature.qualifiers.get("gene")[0]
-                    if "gene" in feature.qualifiers
-                    else None
-                )
-                locus_tag = (
-                    feature.qualifiers.get("locus_tag")[0]
-                    if "locus_tag" in feature.qualifiers
-                    else None
-                )
-                overlaps.append(
-                    {
-                        "read": {
-                            "chromosome": chromosome,
-                            "start": read.reference_start,
-                            "end": read.reference_end,
-                            "sequence": read.query_sequence,
-                            "is_reverse": read.is_reverse,
-                            "mismatches": (
-                                read.get_tag("NM") if read.has_tag("NM") else "0"
-                            ),
-                        },
-                        "feature": {
-                            "chromosome": chromosome,
-                            "start": int(feature.location.start),
-                            "end": int(feature.location.end),
-                            "type": feature.type,
-                            "locus_tag": locus_tag,
-                            "gene_name": gene_name,
-                            "strand": feature.location.strand,
-                        },
-                        "match": {
-                            # Set orientation to 'with' if read and feature are both in the same direction
-                            "orientation": (
-                                "sense"
-                                if (read.is_reverse == (feature.location.strand == -1))
-                                else "antisense"
-                            ),
-                            "offset": overlap.begin - feature_interval.begin,
-                            "overlap": overlap.end - overlap.begin,
-                        },
-                    }
-                )
-    return overlaps
+### Example usage ###
+logger = Logger()
+barcodes = BarCodeLibrary("Example_Libraries/trashlib_eco.tsv", column="spacer")
+genbank = GenBankParser("GCA_000005845.2.gb")
 
-
-barcodes = BarCodeLibrary("Example_Libraries/CN-32-zmo.tsv", column="spacer")
-genbank = GenBankParser("GCA_003054575.1.gb")
+os.environ["TMPDIR"] = "/tmp/ramdisk"
 
 with BowtieRunner() as bowtie:
-    bowtie.write_fasta(genbank.records)
-
-    bowtie.write_fastq(barcodes.barcodes)
-
+    bowtie.make_fasta(genbank.records)
+    bowtie.make_fastq(barcodes.barcodes)
     bowtie.create_index()
-
-    bowtie.align(num_mismatches=1, num_threads=12)
+    bowtie.align(num_mismatches=0, num_threads=12)
 
     sam = PySamParser(bowtie.sam_path)
 
-    overlaps = find_overlaps(sam, genbank)
+    targets = sam.ranges.join(genbank.ranges)
+    
+    barcode_occurrences = targets[targets.Type == "source"].Barcode.value_counts()
 
-    print(json.dumps(overlaps, indent=4))
+    ### Raw code, work in progress ###
+    pam = "NGG"
+
+    def convert_pam(pam):
+        return pam.replace("N", "[GACT]")
+
+    pam_search = convert_pam(pam)
+
+    targets.PAM = targets.df.apply(
+        lambda row: genbank.get_pam_sequence(row, len(pam), "downstream"), axis=1
+    )
+
+    targets.Offset = targets.df.apply(
+        lambda row: (
+            row.Start - row.Start_b if row.Strand_b == "+" else row.End_b - row.End
+        ),
+        axis=1,
+    )
+
+    targets.Overlap = targets.df.apply(
+        lambda row: min(row.End, row.End_b) - max(row.Start, row.Start_b), axis=1
+    )
+
+    targets_with_pam = targets[targets.PAM.str.contains(pam_search, regex=True)]
+
+    # here we're leveraging that source contains the whole genome to get the barcode occurrences
+    pam_barcode_occurrences = targets_with_pam[
+        targets_with_pam.Type == "source"
+    ].Barcode.value_counts()
+
+    gene_targets_with_pam = targets_with_pam[targets_with_pam.Type == "gene"]
+
+    logger.info(f"Interpolated {len(sam.ranges)} barcodes from aligner ...")
+    logger.info(f"Found {len(targets[targets.Type == 'source'])} barcodes in the genome ..."   )
+    logger.info(f"Found {len(pam_barcode_occurrences)} targets with matching PAM: '{pam}'")
+    # logger.info(f"Marking {len(gene_targets_with_pam)} gene targets with matching PAM: '{pam}'")
