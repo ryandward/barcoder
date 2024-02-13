@@ -518,14 +518,26 @@ with BowtieRunner() as bowtie:
     # barcodes with genome targets, here the genome is called "source"
     source_targets = targets[targets.Type == "source"]
     
+    logger.info(f"Found {len(source_targets)} barcodes with genome targets ...")
+    
     # Create a DataFrame with unique combinations of 'Barcode', 'Chromosome', 'Start', 'End'
     unique_genomic_sites = source_targets.df.drop_duplicates(subset=['Barcode', 'Chromosome', 'Start', 'End'])
 
+    logger.info(f"Found {len(unique_genomic_sites)} unique genomic sites ...")
+
+
     # Find barcodes that appear more than once in the unique combinations
     barcode_occurrences_in_unique_sites = unique_genomic_sites['Barcode'].value_counts()
+    
+    logger.info(f"Found {len(barcode_occurrences_in_unique_sites)} unique barcodes ...")
+    
     barcodes_in_multiple_sites = barcode_occurrences_in_unique_sites[barcode_occurrences_in_unique_sites > 1].index
 
+    logger.info(f"Found {len(barcodes_in_multiple_sites)} barcodes that appear in multiple unique genomic sites ...")
+
     multiple_site_barcodes_df = source_targets[source_targets.Barcode.isin(barcodes_in_multiple_sites)].df
+
+    logger.info(f"Found {len(multiple_site_barcodes_df)} sites where these barcodes appear ...")    
 
     # Add the 'Sites' column
     multiple_site_barcodes_df['Sites'] = multiple_site_barcodes_df['Barcode'].map(barcode_occurrences_in_unique_sites)
