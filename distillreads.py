@@ -13,11 +13,12 @@ from queue import Empty
 
 import psutil
 import pyzstd
-from rich import console
+from rich.console import Console
 from rich.console import group
 from rich.panel import Panel
 from rich.progress import Progress, track
 
+console = Console()
 
 def zstd_compress(sequences):
     data = '\n'.join(sequences)
