@@ -319,7 +319,9 @@ class BowtieRunner(Logger):
     @property
     def index_path(self):
         if self._index_path is None:
-            temp_file = tempfile.NamedTemporaryFile(dir=self.temp_dir.name, delete=False)
+            temp_file = tempfile.NamedTemporaryFile(
+                dir=self.temp_dir.name, delete=False
+            )
             self._index_path = temp_file.name
         return self._index_path
 
@@ -493,10 +495,9 @@ class BarCodeLibraryError(Exception):
 
 ### Example usage ###
 logger = Logger()
-barcodes = BarCodeLibrary("Example_Libraries/trashlib_eco.tsv", column="spacer")
-genbank = GenBankParser("GCA_000005845.2.gb")
+barcodes = BarCodeLibrary("Example_Libraries/CN-32-zmo.tsv", column="spacer")
+genbank = GenBankParser("GCA_003054575.1.gb")
 
-os.environ["TMPDIR"] = "/tmp/ramdisk"
 
 with BowtieRunner() as bowtie:
     bowtie.make_fasta(genbank.records)
@@ -506,12 +507,33 @@ with BowtieRunner() as bowtie:
 
     sam = PySamParser(bowtie.sam_path)
 
-    targets = sam.ranges.join(genbank.ranges)
-    
-    barcode_occurrences = targets[targets.Type == "source"].Barcode.value_counts()
+    # TODO: This is a work in progress. I am currently exploring how to create a class.
+    pam = "NGNC"
+    direction = "downstream"
 
-    ### Raw code, work in progress ###
-    pam = "NGG"
+    targets = sam.ranges.join(genbank.ranges)
+
+    ## compile stats ##
+
+    # barcodes with genome targets, here the genome is called "source"
+    source_targets = targets[targets.Type == "source"]
+    
+    # Create a DataFrame with unique combinations of 'Barcode', 'Chromosome', 'Start', 'End'
+    unique_genomic_sites = source_targets.df.drop_duplicates(subset=['Barcode', 'Chromosome', 'Start', 'End'])
+
+    # Find barcodes that appear more than once in the unique combinations
+    barcode_occurrences_in_unique_sites = unique_genomic_sites['Barcode'].value_counts()
+    barcodes_in_multiple_sites = barcode_occurrences_in_unique_sites[barcode_occurrences_in_unique_sites > 1].index
+
+    multiple_site_barcodes_df = source_targets[source_targets.Barcode.isin(barcodes_in_multiple_sites)].df
+
+    # Add the 'Sites' column
+    multiple_site_barcodes_df['Sites'] = multiple_site_barcodes_df['Barcode'].map(barcode_occurrences_in_unique_sites)
+
+    # Convert DataFrame back to PyRanges
+    multiple_site_barcodes = pr.PyRanges(multiple_site_barcodes_df)
+    
+    
 
     def convert_pam(pam):
         return pam.replace("N", "[GACT]")
@@ -519,7 +541,7 @@ with BowtieRunner() as bowtie:
     pam_search = convert_pam(pam)
 
     targets.PAM = targets.df.apply(
-        lambda row: genbank.get_pam_sequence(row, len(pam), "downstream"), axis=1
+        lambda row: genbank.get_pam_sequence(row, len(pam), direction), axis=1
     )
 
     targets.Offset = targets.df.apply(
@@ -535,14 +557,22 @@ with BowtieRunner() as bowtie:
 
     targets_with_pam = targets[targets.PAM.str.contains(pam_search, regex=True)]
 
-    # here we're leveraging that source contains the whole genome to get the barcode occurrences
-    pam_barcode_occurrences = targets_with_pam[
-        targets_with_pam.Type == "source"
-    ].Barcode.value_counts()
+    if targets_with_pam.empty:
+        logger.warn(f"No targets with matching PAM: '{pam}'")
 
-    gene_targets_with_pam = targets_with_pam[targets_with_pam.Type == "gene"]
+    else:
+        # here we're leveraging that source contains the whole genome to get the barcode occurrences
+        pam_barcode_occurrences = targets_with_pam[
+            targets_with_pam.Type == "source"
+        ].Barcode.value_counts()
 
-    logger.info(f"Interpolated {len(sam.ranges)} barcodes from aligner ...")
-    logger.info(f"Found {len(targets[targets.Type == 'source'])} barcodes in the genome ..."   )
-    logger.info(f"Found {len(pam_barcode_occurrences)} targets with matching PAM: '{pam}'")
-    # logger.info(f"Marking {len(gene_targets_with_pam)} gene targets with matching PAM: '{pam}'")
+        gene_targets_with_pam = targets_with_pam[targets_with_pam.Type == "gene"]
+
+        logger.info(f"Interpolated {len(sam.ranges)} barcodes from aligner ...")
+        logger.info(
+            f"Found {len(targets[targets.Type == 'source'])} barcodes in the genome ..."
+        )
+        logger.info(
+            f"Found {len(pam_barcode_occurrences)} targets with matching PAM: '{pam}'"
+        )
+        # logger.info(f"Marking {len(gene_targets_with_pam)} gene targets with matching PAM: '{pam}'")
