@@ -319,7 +319,8 @@ class BowtieRunner(Logger):
     @property
     def index_path(self):
         if self._index_path is None:
-            self._index_path = tempfile.mktemp(dir=self.temp_dir.name)
+            temp_file = tempfile.NamedTemporaryFile(dir=self.temp_dir.name, delete=False)
+            self._index_path = temp_file.name
         return self._index_path
 
     @property
