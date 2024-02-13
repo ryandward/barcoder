@@ -2,6 +2,12 @@
 
 The BarCoder Toolkit is designed to facilitate genome-scale experiments with a focus on efficiency and accuracy. This toolkit offers a range of utilities for genomic data processing, including sequence alignment, data compression, and read analysis.
 
+## Important Disclaimer
+
+* The libraries hosted in the [Example Libraries](Example_Libraries/) directory are _specifically designed as edge cases for stress testing_ the BarCoder Toolkit. They aim to evaluate the toolkit's performance under various conditions and are **not** intended for direct application.
+
+
+
 ## Installation
 
 ### Conda/Mamba
