@@ -4,11 +4,12 @@ The BarCoder Toolkit is designed to facilitate genome-scale experiments with a f
 
 ## Installation
 
-Follow these steps to set up the BarCoder environment:
+### Conda/Mamba
+Follow these steps to set up the BarCoder environment using Conda or Mamba:
 
 1. **Dependencies**: Bowtie is included as part of the `environment.yml` file, ensuring that dependency management is streamlined.
 
-2. **Environment Setup**: Use Mamba or Conda to create your environment:
+2. **Environment Setup**:
     - With Mamba:
       ```bash
       mamba env create -f environment.yml
@@ -19,6 +20,15 @@ Follow these steps to set up the BarCoder environment:
       ```
 
 3. **Post-Installation**: Once the environment is set up, you are ready to use the toolkit. `classes.py` has been implemented to output JSON for valid matches for genomic targets, facilitating downstream analysis and integration.
+
+### Pipenv (For Development)
+Pipenv is supported for development environments, offering an easy and efficient way to manage dependencies:
+
+- **Note**: The Pipenv environment does not include Bowtie. You will need to manage this dependency separately.
+- **Setup**:
+  To set up your development environment using Pipenv, run:
+  ```bash
+  pipenv install --dev
 
 ## Development Updates
 
