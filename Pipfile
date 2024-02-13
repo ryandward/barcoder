@@ -18,6 +18,7 @@ argpar = "*"
 argparse = "*"
 pyarrow = "*"
 intervaltree = "*"
+pyranges = "*"
 
 [dev-packages]
 pylint = "*"
