@@ -35,35 +35,44 @@ with BowtieRunner() as bowtie:
 
     # barcodes with genome targets, here the genome is called "source"
     source_targets = targets[targets.Type == "source"]
-    
+
     logger.info(f"Found {len(source_targets)} barcodes with genome targets ...")
-    
+
     # Create a DataFrame with unique combinations of 'Barcode', 'Chromosome', 'Start', 'End'
-    unique_genomic_sites = source_targets.df.drop_duplicates(subset=['Barcode', 'Chromosome', 'Start', 'End'])
+    unique_genomic_sites = source_targets.df.drop_duplicates(
+        subset=["Barcode", "Chromosome", "Start", "End"]
+    )
 
     logger.info(f"Found {len(unique_genomic_sites)} unique genomic sites ...")
 
-
     # Find barcodes that appear more than once in the unique combinations
-    barcode_occurrences_in_unique_sites = unique_genomic_sites['Barcode'].value_counts()
-    
+    barcode_occurrences_in_unique_sites = unique_genomic_sites["Barcode"].value_counts()
+
     logger.info(f"Found {len(barcode_occurrences_in_unique_sites)} unique barcodes ...")
-    
-    barcodes_in_multiple_sites = barcode_occurrences_in_unique_sites[barcode_occurrences_in_unique_sites > 1].index
 
-    logger.info(f"Found {len(barcodes_in_multiple_sites)} barcodes that appear in multiple unique genomic sites ...")
+    barcodes_in_multiple_sites = barcode_occurrences_in_unique_sites[
+        barcode_occurrences_in_unique_sites > 1
+    ].index
 
-    multiple_site_barcodes_df = source_targets[source_targets.Barcode.isin(barcodes_in_multiple_sites)].df
+    logger.info(
+        f"Found {len(barcodes_in_multiple_sites)} barcodes that appear in multiple unique genomic sites ..."
+    )
 
-    logger.info(f"Found {len(multiple_site_barcodes_df)} sites where these barcodes appear ...")    
+    multiple_site_barcodes_df = source_targets[
+        source_targets.Barcode.isin(barcodes_in_multiple_sites)
+    ].df
+
+    logger.info(
+        f"Found {len(multiple_site_barcodes_df)} sites where these barcodes appear ..."
+    )
 
     # Add the 'Sites' column
-    multiple_site_barcodes_df['Sites'] = multiple_site_barcodes_df['Barcode'].map(barcode_occurrences_in_unique_sites)
+    multiple_site_barcodes_df["Sites"] = multiple_site_barcodes_df["Barcode"].map(
+        barcode_occurrences_in_unique_sites
+    )
 
     # Convert DataFrame back to PyRanges
     multiple_site_barcodes = pr.PyRanges(multiple_site_barcodes_df)
-    
-    
 
     def convert_pam(pam):
         return pam.replace("N", "[GACT]")
@@ -105,35 +114,41 @@ with BowtieRunner() as bowtie:
         logger.info(
             f"Found {len(pam_barcode_occurrences)} targets with matching PAM: '{pam}'"
         )
-        
+
         gene_targets_with_pam_in_multiple_sites = gene_targets_with_pam[
             gene_targets_with_pam.Barcode.isin(barcodes_in_multiple_sites)
         ]
-        
-        logger.info(f"Found {len(gene_targets_with_pam_in_multiple_sites)} gene targets with matching PAM in multiple sites ...")
-        
+
+        logger.info(
+            f"Found {len(gene_targets_with_pam_in_multiple_sites)} gene targets with matching PAM in multiple sites ..."
+        )
+
         # return the genes with pams that are NOT in multiple sites
         gene_targets_with_pam_not_in_multiple_sites = gene_targets_with_pam[
             ~gene_targets_with_pam.Barcode.isin(barcodes_in_multiple_sites)
         ]
-        
-        logger.info(f"Found {len(gene_targets_with_pam_not_in_multiple_sites)} gene targets with matching PAM NOT in multiple sites ...")
+
+        logger.info(
+            f"Found {len(gene_targets_with_pam_not_in_multiple_sites)} gene targets with matching PAM NOT in multiple sites ..."
+        )
         logger.info(gene_targets_with_pam_not_in_multiple_sites.df)
-        
+
         # return sites with PAMS that do NOT have genes associated with
         sites_with_pam_no_genes = targets_with_pam[
             ~targets_with_pam.Barcode.isin(gene_targets_with_pam.Barcode)
         ]
-        logger.info(f"Found {len(sites_with_pam_no_genes)} sites with PAMs that are not located in a gene ...")
-        if(len(sites_with_pam_no_genes) > 0):
+        logger.info(
+            f"Found {len(sites_with_pam_no_genes)} sites with PAMs that are not located in a gene ..."
+        )
+        if len(sites_with_pam_no_genes) > 0:
             logger.info(sites_with_pam_no_genes.df)
-            
+
         # return the sites without a gene with PAMs that are NOT in multiple sites
         sites_with_pam_no_genes_not_in_multiple_sites = sites_with_pam_no_genes[
             ~sites_with_pam_no_genes.Barcode.isin(barcodes_in_multiple_sites)
         ]
-        logger.info(f"Found {len(sites_with_pam_no_genes_not_in_multiple_sites)} sites with PAMs that are not located in a gene and NOT in multiple sites ...")
-        if(len(sites_with_pam_no_genes_not_in_multiple_sites) > 0):
+        logger.info(
+            f"Found {len(sites_with_pam_no_genes_not_in_multiple_sites)} sites with PAMs that are not located in a gene and NOT in multiple sites ..."
+        )
+        if len(sites_with_pam_no_genes_not_in_multiple_sites) > 0:
             logger.info(sites_with_pam_no_genes_not_in_multiple_sites.df)
-            
-        
