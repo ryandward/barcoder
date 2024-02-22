@@ -611,16 +611,22 @@ def main(args):
                 )
 
             console.log(
-                """
-Consider running the analysis individually but be aware that since flanks were unable 
-to be identified, the barcode positions may be correct while running as a singleton, 
-but no error will be thrown.
 
-Begin by rerunning on the read containing the flank that was able to be identified above.
+"""
+In the analysis, guides are presumed to be in the same position across all reads. 
+If this assumption disrupts your pipeline, we welcome your feedback on our GitHub page: 
 
-Guides are expected to appear in the same position for each read. 
-If this assumption breaks your pipeline, feel free to leave a comment on the GitHub page. 
 [bold]https://github.com/ryandward/barcoder/issues[/bold]
+
+You might want to consider running the analysis with a single set of reads. 
+
+Please note, if flanks could not be identified, the localization of barcode positions may be unsuccessful with just one read. 
+
+Without the second read, this error cannot be triggered, so please proceed with caution.
+
+However, if one read is of superior quality, it might be advantageous to proceed with that read alone.
+
+Start by rerunning the analysis on the read that contains the identifiable flank.
 """
             )
             raise ValueError("A critical error occurred: " + ", ".join(list(error_messages)))
