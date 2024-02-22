@@ -35,7 +35,7 @@ def read_fasta(fasta_file) -> Set[str]:
     open_func = gzip.open if fasta_file.endswith(".gz") else open
     with open_func(fasta_file, "rt") as f:
         for line in f:
-            if not line.startswith('>'):
+            if not line.startswith(">"):
                 barcodes.add(line.strip())
     return barcodes
 
@@ -374,7 +374,6 @@ def find_flanks(
 
     L_most_common = extract_best_flank(L_flanks)
     R_most_common = extract_best_flank(R_flanks)
-
     return L_most_common, R_most_common
 
 
@@ -585,19 +584,46 @@ def main(args):
         # Check if the fwd and reverse flanking sequences are reverse complements
         L_min_len = R_min_len = 0
 
+        error_messages = set()
+
         if L_fwd and R_rev_rev:
             L_min_len = min(len(L_fwd), len(R_rev_rev))
             if L_fwd[-L_min_len:] != R_rev_rev[:L_min_len]:
-                raise ValueError(
-                    f"Forward and reverse left flanking sequences ({L_fwd} and {R_rev_rev}) do not contain substrings that are reverse complements."
-                )
+                error_messages.add("Flank complementarity violation")
 
         if R_fwd and L_rev_rev:
             R_min_len = min(len(R_fwd), len(L_rev_rev))
             if R_fwd[:R_min_len] != L_rev_rev[:R_min_len]:
-                raise ValueError(
-                    f"Forward and reverse right flanking sequences ({R_fwd} and {L_rev_rev}) do not contain substrings that are reverse complements."
+                error_messages.add("Flank complementarity violation")
+
+        if error_messages:
+            console.log(
+                "\n[bold yellow]Warning[/ bold yellow]: Expected complemtarity not found for flanking sequences..."
+            )
+
+            if L_fwd and R_rev_rev:
+                console.log(
+                    f"[bold]Left flank[/bold]:  '{L_fwd}' (./{reads1}) != '{R_rev_rev}' (./{reads2} revcomp)"
                 )
+            if R_fwd and L_rev_rev:
+                console.log(
+                    f"[bold]Right flank[/bold]: '{R_fwd}' (./{reads1}) != '{L_rev_rev}' (./{reads2} revcomp)"
+                )
+
+            console.log(
+                """
+Consider running the analysis individually but be aware that since flanks were unable 
+to be identified, the barcode positions may be correct while running as a singleton, 
+but no error will be thrown.
+
+Begin by rerunning on the read containing the flank that was able to be identified above.
+
+Guides are expected to appear in the same position for each read. 
+If this assumption breaks your pipeline, feel free to leave a comment on the GitHub page. 
+[bold]https://github.com/ryandward/barcoder/issues[/bold]
+"""
+            )
+            raise ValueError("A critical error occurred: " + ", ".join(list(error_messages)))
 
         def add_flank(barcodes, L_flank=None, R_flank=None):
             L_flank, R_flank = (L_flank or ""), (R_flank or "")
@@ -792,11 +818,11 @@ def main(args):
 
     except ValueError as ve:
         console_error.log(str(ve))
-        console.log(parser.format_help())
+        console.log("\n" + parser.format_help())
 
     except Exception as e:
         console_error.log(f"An unexpected error occurred: {str(e)}")
-        console.log(parser.format_help())
+        console.log("\n" + parser.format_help())
 
 
 if __name__ == "__main__":
