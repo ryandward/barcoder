@@ -557,8 +557,13 @@ def main(args):
             f"Sampled {new_reads_sampled:,} reads and found {safe_len(unique_barcodes):,} barcodes in {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse matches..."
         )
 
+
+        forward_name = os.path.basename(reads1)
+        reverse_name = os.path.basename(reads2) if reads2 else None
+        
         if need_swap:
             console.log("Swapping orientation...")
+            forward_name, reverse_name = reverse_name, forward_name
 
         console.log("Identifying flanking sequences...")
 
@@ -603,11 +608,11 @@ def main(args):
 
             if L_fwd and R_rev_rev:
                 console.log(
-                    f"[bold]Left flank[/bold]:  '{L_fwd}' (./{reads1}) != '{R_rev_rev}' (./{reads2} revcomp)"
+                    f"[bold]Left flank[/bold]:  '{L_fwd}' (./{forward_name}) != '{R_rev_rev}' (./{reverse_name} revcomp)"
                 )
             if R_fwd and L_rev_rev:
                 console.log(
-                    f"[bold]Right flank[/bold]: '{R_fwd}' (./{reads1}) != '{L_rev_rev}' (./{reads2} revcomp)"
+                    f"[bold]Right flank[/bold]: '{R_fwd}' (./{forward_name}) != '{L_rev_rev}' (./{reverse_name} revcomp)"
                 )
 
             console.log(
