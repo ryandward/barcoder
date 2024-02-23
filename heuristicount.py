@@ -182,6 +182,7 @@ def sample_data(file1, file2, barcodes, is_paired):
     num_chunks = 0
 
     for read1_chunk, read2_chunk in chunk_generator:
+        num_chunks += 1
 
         # Lists to collect orientations and offsets for this chunk
         novel_read1_orientations = []
@@ -308,9 +309,7 @@ def sample_data(file1, file2, barcodes, is_paired):
             ):
                 satisfy_diversity = True
                 break
-        
-        num_chunks += 1
-    
+   
     if satisfy_diversity:
         logger.info("Satisfied diversity criteria...")
     if not satisfy_diversity:
