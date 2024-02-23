@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from contextlib import nullcontext
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
-from typing import List, Set, Tuple
+from typing import Generator, List, Set, Tuple
 
 import rich
 import zstandard as zstd
@@ -16,6 +16,12 @@ from rich.console import Console
 from rich.table import Table
 import rich.table
 from Bio import SeqIO
+
+from Logger import Logger
+
+logger = Logger()
+
+assumption_feedback = "If this assumption disrupts your pipeline, we welcome your feedback on our GitHub page:\nhttps://github.com/ryandward/barcoder/issues"
 
 
 def rev_comp(sequence: str) -> str:
@@ -32,36 +38,21 @@ def generate_kmers(seq: str, k: int) -> Set[str]:
 
 def read_fasta(fasta_file) -> Set[str]:
     barcodes = set()
-    open_func = gzip.open if fasta_file.endswith(".gz") else open
+    if fasta_file.endswith(".gz"):
+        open_func = gzip.open
+    elif fasta_file.endswith(".zst"):
+        open_func = zstd.open
+    elif fasta_file.endswith(".fasta") or fasta_file.endswith(".fa"):
+        open_func = open
+    else:
+        raise ValueError(
+            f'"{fasta_file}" does not appear to be a supported fasta file: .fasta or .fa.'
+        )
     with open_func(fasta_file, "rt") as f:
         for line in f:
             if not line.startswith(">"):
                 barcodes.add(line.strip())
     return barcodes
-
-
-def validate_barcodes(barcodes):
-    # If the input is a string, treat it as a filename
-    if isinstance(barcodes, str):
-        sequences = list(SeqIO.parse(barcodes, "fasta"))
-    # If the input is a list, treat it as a list of sequences
-    elif isinstance(barcodes, list):
-        sequences = barcodes
-    else:
-        raise ValueError("The input should be a filename or a list of barcodes.")
-
-    # Check if there are at least 10 sequences
-    if len(sequences) < 10:
-        raise ValueError(
-            "The input contains fewer than 10 sequences. Please provide at least 10 short barcodes."
-        )
-
-    # Check if the sequences are short (e.g., no more than 1,000 bases)
-    for seq in sequences:
-        if len(seq) > 1000:
-            raise ValueError(
-                f'The sequence "{seq.id}" is longer than 1,000 bases. Provide a list or fasta file of short barcodes.'
-            )
 
 
 def open_reads_file(file_path, mode):
@@ -79,7 +70,34 @@ def open_reads_file(file_path, mode):
         )
 
 
-def read_in_chunks(file1, file2=None, chunk_size=2**16) -> Tuple[List[str], List[str]]:
+def validate_barcodes(barcodes):
+
+    if isinstance(barcodes, list):
+        sequences = set(barcodes)
+
+    elif isinstance(barcodes, set):
+        sequences = barcodes
+
+    else:
+        raise ValueError("Pass a list or set of barcodes to validate.")
+
+    # Check if there are at least 10 sequences
+    if len(sequences) < 10:
+        raise ValueError(
+            "The input contains fewer than 10 sequences. Please provide at least 10 short barcodes."
+        )
+
+    # Check if the sequences are short (e.g., no more than 1,000 bases)
+    for seq in sequences:
+        if len(seq) > 1000:
+            raise ValueError(
+                f'The sequence "{seq.id}" is longer than 1,000 bases. Provide a list or fasta file of short barcodes.'
+            )
+
+
+def read_in_chunks(
+    file1, file2=None, chunk_size=2**16
+) -> Generator[Tuple[str, str], None, None]:
     reads1, reads2 = [], []
 
     # Remove compression extension if present
@@ -134,16 +152,17 @@ def read_in_chunks(file1, file2=None, chunk_size=2**16) -> Tuple[List[str], List
 
 
 def sample_data(file1, file2, barcodes, is_paired):
-
+    satisfy_diversity = False
+    
     rev_barcodes = set(rev_comp(bc) for bc in barcodes)
     bc_len = len(next(iter(barcodes)))
     chunk_generator = read_in_chunks(
         file1, file2 if is_paired else None, chunk_size=10 * len(barcodes)
     )
-    processed_count1 = 0
-    processed_count2 = 0
-    valid_count1 = 0
-    valid_count2 = 0
+    novel_context_read_count1 = 0
+    novel_context_read_count2 = 0
+    barcode_diversity_count1 = 0
+    barcode_diversity_count2 = 0
 
     # Overall Counters
     global_read1_orientations = Counter()
@@ -152,23 +171,26 @@ def sample_data(file1, file2, barcodes, is_paired):
     global_read2_offsets = Counter()
 
     # Sets to determine sampling depth
-    valid_reads1 = set()
-    valid_reads2 = set()
+    global_valid_reads1 = set()
+    global_valid_reads2 = set()
 
     seen_reads = set()
 
     # Keep track of the unique barcodes seen in any orientation
-    unique_barcodes = set()
+    global_observed_barcodes = set()
+
+    num_chunks = 0
 
     for read1_chunk, read2_chunk in chunk_generator:
 
         # Lists to collect orientations and offsets for this chunk
-        read1_orientations = []
-        read1_offsets = []
+        novel_read1_orientations = []
+        novel_read1_offsets = []
 
-        read2_orientations = []
-        read2_offsets = []
-        valid_kmers = set()
+        novel_read2_orientations = []
+        novel_read2_offsets = []
+
+        novel_barcodes = set()
 
         for read1, read2 in zip(
             read1_chunk, read2_chunk if read2_chunk else [None] * len(read1_chunk)
@@ -182,106 +204,118 @@ def sample_data(file1, file2, barcodes, is_paired):
             if read2:
                 seen_reads.add(read2)
 
-            processed_count1 += 1
+            # Initially assume the read is novel, then decrement if a seen barcode is found
+            novel_context_read_count1 += 1
             if read2:
-                processed_count2 += 1
+                novel_context_read_count2 += 1
 
             for i in range(len(read1) - bc_len + 1):
                 kmer = read1[i : i + bc_len]
-                if kmer in barcodes:
 
-                    if kmer in valid_kmers:
-                        processed_count1 -= 1
+                if kmer in barcodes:
+                    if kmer in novel_barcodes:
+                        novel_context_read_count1 -= 1
                         continue
-                    valid_count1 += 1
-                    valid_kmers.add(kmer)
-                    unique_barcodes.add(kmer)
-                    read1_orientations.append("forward")
-                    read1_offsets.append(i)
-                    valid_reads1.add(read1)
+
+                    barcode_diversity_count1 += 1
+                    novel_barcodes.add(kmer)
+                    global_observed_barcodes.add(kmer)
+                    novel_read1_orientations.append("forward")
+                    novel_read1_offsets.append(i)
+                    global_valid_reads1.add(read1)
 
                 elif kmer in rev_barcodes:
-
-                    if kmer in valid_kmers:
-                        processed_count1 -= 1
+                    if kmer in novel_barcodes:
+                        novel_context_read_count1 -= 1
                         continue
-                    valid_count1 += 1
-                    valid_kmers.add(kmer)
-                    unique_barcodes.add(kmer)
-                    read1_orientations.append("reverse")
-                    read1_offsets.append(i)
-                    valid_reads1.add(read1)
+
+                    barcode_diversity_count1 += 1
+                    novel_barcodes.add(kmer)
+                    global_observed_barcodes.add(kmer)
+                    novel_read1_orientations.append("reverse")
+                    novel_read1_offsets.append(i)
+                    global_valid_reads1.add(read1)
 
                 if is_paired:
                     kmer2 = read2[i : i + bc_len]
                     if kmer2 in barcodes:
-                        if kmer2 in valid_kmers:
-                            processed_count2 -= 1
+                        if kmer2 in novel_barcodes:
+                            novel_context_read_count2 -= 1
                             continue
-                        valid_count2 += 1
-                        valid_kmers.add(kmer2)
-                        unique_barcodes.add(kmer)
-                        read2_orientations.append("forward")
-                        read2_offsets.append(i)
-                        valid_reads2.add(read2)
+
+                        barcode_diversity_count2 += 1
+                        novel_barcodes.add(kmer2)
+                        global_observed_barcodes.add(kmer)
+                        novel_read2_orientations.append("forward")
+                        novel_read2_offsets.append(i)
+                        global_valid_reads2.add(read2)
 
                     elif kmer2 in rev_barcodes:
-                        if kmer2 in valid_kmers:
-                            processed_count2 -= 1
+                        if kmer2 in novel_barcodes:
+                            novel_context_read_count2 -= 1
                             continue
-                        valid_count2 += 1
-                        valid_kmers.add(kmer2)
-                        unique_barcodes.add(kmer)
-                        read2_orientations.append("reverse")
-                        read2_offsets.append(i)
-                        valid_reads2.add(read2)
 
-        # print(len(seen_reads), len(valid_kmers), len(valid_reads1), len(valid_reads2), valid_count1, valid_count2, file=sys.stderr)
+                        barcode_diversity_count2 += 1
+                        novel_barcodes.add(kmer2)
+                        global_observed_barcodes.add(kmer)
+                        novel_read2_orientations.append("reverse")
+                        novel_read2_offsets.append(i)
+                        global_valid_reads2.add(read2)
 
         # Update the global counters after processing each chunk
-        global_read1_orientations.update(read1_orientations)
-        global_read1_offsets.update(read1_offsets)
+        global_read1_orientations.update(novel_read1_orientations)
+        global_read1_offsets.update(novel_read1_offsets)
 
-        global_read2_orientations.update(read2_orientations)
-        global_read2_offsets.update(read2_offsets)
+        global_read2_orientations.update(novel_read2_orientations)
+        global_read2_offsets.update(novel_read2_offsets)
 
         read1_offsets_common = Counter(global_read1_offsets).most_common(2)
         read2_offsets_common = Counter(global_read2_offsets).most_common(2)
 
         # Check conditions for two reads
-        # if ((read2 and valid_count1 >= 10 * len(barcodes) and valid_count2 >= 10 * len(barcodes)) or (len(seen_reads) >= 10 * len(valid_kmers) and len(valid_kmers) != 0)):
         if (
-            len(valid_reads1) >= len(barcodes)
-            and len(valid_reads2) >= len(barcodes)
+            len(global_valid_reads1) >= len(barcodes)
+            and len(global_valid_reads2) >= len(barcodes)
             and (
-                valid_count1 >= 10 * len(barcodes)
-                and valid_count2 >= 10 * len(barcodes)
+                barcode_diversity_count1 >= 10 * len(barcodes)
+                and barcode_diversity_count2 >= 10 * len(barcodes)
             )
-            or (len(seen_reads) >= 10 * len(valid_kmers) and len(valid_kmers) != 0)
+            or (
+                len(seen_reads) >= 10 * len(novel_barcodes) and len(novel_barcodes) != 0
+            )
         ):
             # Break if there's a single dominant offset or the most common is 5 times more frequent than the second
-            # print("TRUE", file=sys.stderr)
             if (len(read1_offsets_common) == 1 and len(read2_offsets_common) == 1) or (
                 len(read1_offsets_common) > 1
                 and len(read2_offsets_common) > 1
                 and read1_offsets_common[0][1] >= 2 * read1_offsets_common[1][1]
                 and read2_offsets_common[0][1] >= 2 * read2_offsets_common[1][1]
             ):
+                satisfy_diversity = True
                 break
 
         # Check conditions for a single read
-        # elif (not read2 and valid_count1 >= 250 * len(barcodes) or (len(seen_reads) >= 10 * len(valid_kmers) and len(valid_kmers) != 0)):
-        elif (not read2 and len(valid_reads1) >= len(barcodes)) and (
-            valid_count1 >= 10 * len(barcodes)
-            or (len(seen_reads) >= 10 * len(valid_kmers) and len(valid_kmers) != 0)
+        elif (not read2 and len(global_valid_reads1) >= len(barcodes)) and (
+            barcode_diversity_count1 >= 10 * len(barcodes)
+            or (
+                len(seen_reads) >= 10 * len(novel_barcodes) and len(novel_barcodes) != 0
+            )
         ):
             # Break if there's a single dominant offset or the most common is 5 times more frequent than the second
             if len(read1_offsets_common) == 1 or (
                 len(read1_offsets_common) > 1
                 and read1_offsets_common[0][1] >= 2 * read1_offsets_common[1][1]
             ):
+                satisfy_diversity = True
                 break
-
+        
+        num_chunks += 1
+    
+    if satisfy_diversity:
+        logger.info("Satisfied diversity criteria...")
+    if not satisfy_diversity:
+        logger.warn("Unable to satisfy diversity criteria. Sequencing depth is probably insufficient!")
+    
     read1_orientation = (
         Counter(global_read1_orientations).most_common(1)[0][0] if read1 else None
     )
@@ -295,25 +329,27 @@ def sample_data(file1, file2, barcodes, is_paired):
     if read1_orientation == "forward" or read2_orientation == "reverse":
         need_swap = False
         return (
-            processed_count1 + processed_count2,
+            novel_context_read_count1 + novel_context_read_count2,
             read1_offset,
             read2_offset,
-            valid_reads1,
-            valid_reads2,
-            unique_barcodes,
+            global_valid_reads1,
+            global_valid_reads2,
+            global_observed_barcodes,
             need_swap,
+            num_chunks
         )
 
     elif read1_orientation == "reverse" or read2_orientation == "forward":
         need_swap = True
         return (
-            processed_count1 + processed_count2,
+            novel_context_read_count1 + novel_context_read_count2,
             read2_offset,
             read1_offset,
-            valid_reads2,
-            valid_reads1,
-            unique_barcodes,
+            global_valid_reads2,
+            global_valid_reads1,
+            global_observed_barcodes,
             need_swap,
+            num_chunks
         )
 
     else:
@@ -438,7 +474,7 @@ def process_chunk(
             )
 
         for record_fwd, record_rev in zip(reads1, reads2):
-            if "N" in record_fwd:
+            if "N" in record_fwd or "N" in record_rev:
                 continue
 
             seq_with_flanks_fwd = record_fwd[
@@ -517,11 +553,7 @@ def process_chunk(
 def main(args):
     from rich.style import Style
 
-    console = Console(stderr=True, highlight=True, style=Style(color="white"))
-    console_error = Console(
-        stderr=True, highlight=True, style=Style(color="red", bold=True)
-    )
-    console.log("Initializing heuristic barcode counting...")
+    logger.info("Initializing heuristic barcode counting...")
 
     reads1 = args.file1
     reads2 = args.file2
@@ -529,19 +561,30 @@ def main(args):
     num_threads = cpu_count() // 2
 
     # Reading FASTA File
-    console.log(
-        "Reading barcodes...",
-    )
+    logger.info("Reading barcodes...")
 
     try:
-        validate_barcodes(args.fasta_file)
         barcodes = read_fasta(args.fasta_file)
+
+        validate_barcodes(barcodes)
+
         bcs_rev = {rev_comp(barcode) for barcode in barcodes}
-        bc_len = len(next(iter(barcodes)))
+
+        barcodes_iterator = iter(barcodes)
+        first_barcode = next(barcodes_iterator)
+        bc_len = len(first_barcode)
+
+        for barcode in barcodes_iterator:
+            if len(barcode) != bc_len:
+                logger.warn(
+                    f"One of the assumptions of this analysis is that all barcodes are the same length\n{assumption_feedback}"
+                )
+                raise ValueError("All barcodes must be the same length")
+
         is_paired = bool(args.file2)
 
         # Reading reads Files
-        console.log("Sampling initial reads for orientation...")
+        logger.info("Sampling reads to identify diversity characteristics...")
 
         (
             new_reads_sampled,
@@ -549,23 +592,23 @@ def main(args):
             bc_start2,
             sample1,
             sample2,
-            unique_barcodes,
+            global_observed_barcodes,
             need_swap,
+            num_chunks
         ) = sample_data(reads1, reads2, barcodes, is_paired)
-        # console.log(f"Sampled {new_reads_sampled:,} unique reads. Found {processed_count1:,} valid matches, including {safe_len(sample1):,} unique forward matches and {safe_len(sample2):,} unique reverse matches...")
-        console.log(
-            f"Sampled {new_reads_sampled:,} reads and found {safe_len(unique_barcodes):,} barcodes in {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse matches..."
+        # logger.info(f"Sampled {new_reads_sampled:,} unique reads. Found {processed_count1:,} valid matches, including {safe_len(sample1):,} unique forward matches and {safe_len(sample2):,} unique reverse matches...")
+        logger.info(
+            f"Sampled {new_reads_sampled:,} diverse contexts in {num_chunks} chunks and found {safe_len(global_observed_barcodes):,} barcodes in {safe_len(sample1):,} forward and {safe_len(sample2):,} reverse reads..."
         )
-
 
         forward_name = os.path.basename(reads1)
         reverse_name = os.path.basename(reads2) if reads2 else None
-        
+
         if need_swap:
-            console.log("Swapping orientation...")
+            logger.info("Swapping orientation...")
             forward_name, reverse_name = reverse_name, forward_name
 
-        console.log("Identifying flanking sequences...")
+        logger.info("Identifying flanking sequences...")
 
         # Find flanking sequences
         if sample1 is not None:
@@ -602,26 +645,20 @@ def main(args):
                 error_messages.add("Flank complementarity violation")
 
         if error_messages:
-            console.log(
-                "\n[bold yellow]Warning[/ bold yellow]: Expected complemtarity not found for flanking sequences..."
-            )
+            logger.warn("Expected complemtarity not found for flanking sequences...")
 
             if L_fwd and R_rev_rev:
-                console.log(
-                    f"[bold]Left flank[/bold]:  '{L_fwd}' (./{forward_name}) != '{R_rev_rev}' (./{reverse_name} revcomp)"
+                logger.info(
+                    f"Left flank:  '{L_fwd}' (./{forward_name}) != '{R_rev_rev}' (./{reverse_name} revcomp)"
                 )
             if R_fwd and L_rev_rev:
-                console.log(
-                    f"[bold]Right flank[/bold]: '{R_fwd}' (./{forward_name}) != '{L_rev_rev}' (./{reverse_name} revcomp)"
+                logger.info(
+                    f"Right flank: '{R_fwd}' (./{forward_name}) != '{L_rev_rev}' (./{reverse_name} revcomp)"
                 )
 
-            console.log(
-
-"""
-In the analysis, guides are presumed to be in the same position across all reads. 
-If this assumption disrupts your pipeline, we welcome your feedback on our GitHub page: 
-
-[bold]https://github.com/ryandward/barcoder/issues[/bold]
+            logger.info(
+                f"""In the analysis, guides are presumed to be in the same position across all reads.
+{assumption_feedback}
 
 You might want to consider running the analysis with a single set of reads. 
 
@@ -634,7 +671,9 @@ However, if one read is of superior quality, it might be advantageous to proceed
 Start by rerunning the analysis on the read that contains the identifiable flank.
 """
             )
-            raise ValueError("A critical error occurred: " + ", ".join(list(error_messages)))
+            raise ValueError(
+                "A critical error occurred: " + ", ".join(list(error_messages))
+            )
 
         def add_flank(barcodes, L_flank=None, R_flank=None):
             L_flank, R_flank = (L_flank or ""), (R_flank or "")
@@ -645,7 +684,7 @@ Start by rerunning the analysis on the read that contains the identifiable flank
         bcs_with_flanks_fwd = add_flank(barcodes, L_fwd, R_fwd)
         bcs_with_flanks_rev = add_flank(bcs_rev, L_rev, R_rev)
 
-        console.log("Executing high-throughput read analysis...")
+        logger.info("Executing high-throughput read analysis...")
         chunk_generator = read_in_chunks(args.file1, args.file2 if is_paired else None)
 
         # Create argument generator
@@ -670,7 +709,7 @@ Start by rerunning the analysis on the read that contains the identifiable flank
         with Pool(num_threads) as pool:
             results = pool.starmap(process_chunk, args_generator)
         # Collating Results
-        console.log("Finishing up and collating results!")
+        logger.info("Finishing up and collating results!")
 
         doc_bcs = Counter()
         undoc_bcs = Counter()
@@ -819,6 +858,7 @@ Start by rerunning the analysis on the read that contains the identifiable flank
             combined_table.add_row(barcode, f"{count:,}", end_section=end_section)
 
         # Print the combined table
+        console = Console(stderr=True)
         console.log(combined_table)
 
         for barcode, count in doc_bcs.items():
@@ -828,12 +868,12 @@ Start by rerunning the analysis on the read that contains the identifiable flank
             print("\t".join([barcode, str(count)]))
 
     except ValueError as ve:
-        console_error.log(str(ve))
-        console.log("\n" + parser.format_help())
+        logger.error(f"{str(ve)}")
+        # logger.help(parser.format_help())
 
     except Exception as e:
-        console_error.log(f"An unexpected error occurred: {str(e)}")
-        console.log("\n" + parser.format_help())
+        logger.error(f"An unexpected error occurred: {str(e)}")
+        # logger.help(parser.format_help())
 
 
 if __name__ == "__main__":
