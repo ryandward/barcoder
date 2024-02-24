@@ -153,31 +153,34 @@ def read_in_chunks(
 
 def sample_data(file1, file2, barcodes, is_paired):
     satisfy_diversity = False
-    
+
     rev_barcodes = set(rev_comp(bc) for bc in barcodes)
     bc_len = len(next(iter(barcodes)))
     chunk_generator = read_in_chunks(
-        file1, file2 if is_paired else None, chunk_size=10 * len(barcodes)
+        file1, file2 if is_paired else None, chunk_size=len(barcodes)
     )
-    novel_context_read_count1 = 0
-    novel_context_read_count2 = 0
-    barcode_diversity_count1 = 0
-    barcode_diversity_count2 = 0
 
-    # Overall Counters
-    global_read1_orientations = Counter()
+    diversity_count1 = 0
+    diversity_count2 = 0
+
+    # Orientation determination
+    global_read1_orients = Counter()
+    global_read2_orients = Counter()
+
+    # Offset determination
     global_read1_offsets = Counter()
-    global_read2_orientations = Counter()
     global_read2_offsets = Counter()
 
-    # Sets to determine sampling depth
+    # Sequencing depth determination
     global_valid_reads1 = set()
     global_valid_reads2 = set()
 
-    seen_reads = set()
+    global_novel_reads = set()
 
     # Keep track of the unique barcodes seen in any orientation
     global_observed_barcodes = set()
+
+    global_novel_barcodes = []
 
     num_chunks = 0
 
@@ -185,170 +188,191 @@ def sample_data(file1, file2, barcodes, is_paired):
         num_chunks += 1
 
         # Lists to collect orientations and offsets for this chunk
-        novel_read1_orientations = []
+        novel_read1_orients = []
         novel_read1_offsets = []
 
-        novel_read2_orientations = []
+        novel_read2_orients = []
         novel_read2_offsets = []
 
         novel_barcodes = set()
+
+        novel_reads = set()
 
         for read1, read2 in zip(
             read1_chunk, read2_chunk if read2_chunk else [None] * len(read1_chunk)
         ):
 
             # Bypass pairs of reads if the read1 or read2 has been seen before
-            if read1 in seen_reads or (read2 and read2 in seen_reads):
+            if read1 in novel_reads or (read2 and read2 in novel_reads):
                 continue
 
-            seen_reads.add(read1)
-            if read2:
-                seen_reads.add(read2)
-
-            # Initially assume the read is novel, then decrement if a seen barcode is found
-            novel_context_read_count1 += 1
-            if read2:
-                novel_context_read_count2 += 1
+            # Now we've seen the read
+            global_novel_reads.add(read1)
+            if is_paired:
+                global_novel_reads.add(read2)
 
             for i in range(len(read1) - bc_len + 1):
                 kmer = read1[i : i + bc_len]
 
+                if kmer in novel_barcodes:
+                    # We've already seen it this chunk
+                    continue
+
                 if kmer in barcodes:
-                    if kmer in novel_barcodes:
-                        novel_context_read_count1 -= 1
-                        continue
-
-                    barcode_diversity_count1 += 1
+                    diversity_count1 += 1
                     novel_barcodes.add(kmer)
                     global_observed_barcodes.add(kmer)
-                    novel_read1_orientations.append("forward")
+                    novel_read1_orients.append("forward")
                     novel_read1_offsets.append(i)
                     global_valid_reads1.add(read1)
+                    novel_reads.add(read1)
 
-                elif kmer in rev_barcodes:
-                    if kmer in novel_barcodes:
-                        novel_context_read_count1 -= 1
-                        continue
-
-                    barcode_diversity_count1 += 1
+                if kmer in rev_barcodes:
+                    diversity_count1 += 1
                     novel_barcodes.add(kmer)
                     global_observed_barcodes.add(kmer)
-                    novel_read1_orientations.append("reverse")
+                    novel_read1_orients.append("reverse")
                     novel_read1_offsets.append(i)
                     global_valid_reads1.add(read1)
+                    novel_reads.add(read1)
 
                 if is_paired:
                     kmer2 = read2[i : i + bc_len]
+
+                    if kmer2 in novel_barcodes:
+                        # We've already seen it this chunk
+                        continue
+
                     if kmer2 in barcodes:
-                        if kmer2 in novel_barcodes:
-                            novel_context_read_count2 -= 1
-                            continue
-
-                        barcode_diversity_count2 += 1
+                        diversity_count2 += 1
                         novel_barcodes.add(kmer2)
                         global_observed_barcodes.add(kmer)
-                        novel_read2_orientations.append("forward")
+                        novel_read2_orients.append("forward")
                         novel_read2_offsets.append(i)
                         global_valid_reads2.add(read2)
+                        novel_reads.add(read2)
 
-                    elif kmer2 in rev_barcodes:
-                        if kmer2 in novel_barcodes:
-                            novel_context_read_count2 -= 1
-                            continue
-
-                        barcode_diversity_count2 += 1
+                    if kmer2 in rev_barcodes:
+                        diversity_count2 += 1
                         novel_barcodes.add(kmer2)
                         global_observed_barcodes.add(kmer)
-                        novel_read2_orientations.append("reverse")
+                        novel_read2_orients.append("reverse")
                         novel_read2_offsets.append(i)
                         global_valid_reads2.add(read2)
+                        novel_reads.add(read2)
+
+        global_novel_barcodes.extend(novel_barcodes)
 
         # Update the global counters after processing each chunk
-        global_read1_orientations.update(novel_read1_orientations)
+        global_read1_orients.update(novel_read1_orients)
         global_read1_offsets.update(novel_read1_offsets)
 
-        global_read2_orientations.update(novel_read2_orientations)
+        global_read2_orients.update(novel_read2_orients)
         global_read2_offsets.update(novel_read2_offsets)
 
         read1_offsets_common = Counter(global_read1_offsets).most_common(2)
         read2_offsets_common = Counter(global_read2_offsets).most_common(2)
 
-        # Check conditions for two reads
-        if (
-            len(global_valid_reads1) >= len(barcodes)
-            and len(global_valid_reads2) >= len(barcodes)
-            and (
-                barcode_diversity_count1 >= 10 * len(barcodes)
-                and barcode_diversity_count2 >= 10 * len(barcodes)
-            )
-            or (
-                len(seen_reads) >= 10 * len(novel_barcodes) and len(novel_barcodes) != 0
-            )
-        ):
-            # Break if there's a single dominant offset or the most common is 5 times more frequent than the second
-            if (len(read1_offsets_common) == 1 and len(read2_offsets_common) == 1) or (
-                len(read1_offsets_common) > 1
-                and len(read2_offsets_common) > 1
-                and read1_offsets_common[0][1] >= 2 * read1_offsets_common[1][1]
-                and read2_offsets_common[0][1] >= 2 * read2_offsets_common[1][1]
-            ):
-                satisfy_diversity = True
-                break
+        # logger.debug(f"Chunk {num_chunks} summary:")
+        # logger.debug(f"Number of global valid reads 1: {len(global_valid_reads1)}")
+        # logger.debug(f"Number of global valid reads 2: {len(global_valid_reads2)}")
+        # logger.debug(f"Barcode diversity count 1: {diversity_count1}")
+        # logger.debug(f"Barcode diversity count 2: {diversity_count2}")
+        # logger.debug(
+        #     f"Length of global observed barcodes: {len(global_observed_barcodes)}"
+        # )
+        # logger.debug(f"Number of barcodes: {len(barcodes)}")
+        # logger.debug(f"Number of global novel reads: {len(global_novel_reads)}")
+        # logger.debug(f"Local novel reads: {len(novel_reads)}")
+        # logger.debug(f"Length of novel barcodes: {len(novel_barcodes)}")
+        # logger.debug(f"Global novel barcodes: {len(global_novel_barcodes)}")
 
-        # Check conditions for a single read
-        elif (not read2 and len(global_valid_reads1) >= len(barcodes)) and (
-            barcode_diversity_count1 >= 10 * len(barcodes)
-            or (
-                len(seen_reads) >= 10 * len(novel_barcodes) and len(novel_barcodes) != 0
-            )
-        ):
-            # Break if there's a single dominant offset or the most common is 5 times more frequent than the second
-            if len(read1_offsets_common) == 1 or (
-                len(read1_offsets_common) > 1
-                and read1_offsets_common[0][1] >= 2 * read1_offsets_common[1][1]
+        # Check conditions for two reads
+        if is_paired:
+            if all(
+                count >= 5 * len(barcodes)
+                for count in (diversity_count1, diversity_count2)
             ):
+                logger.info("Many barcodes seen enough in reads...")
                 satisfy_diversity = True
-                break
-   
-    if satisfy_diversity:
-        logger.info("Satisfied diversity criteria...")
+
+            if len(global_novel_reads) >= 5 * len(barcodes) and global_novel_barcodes:
+                logger.info("Read depth diversity satisfied...")
+                satisfy_diversity = True
+
+            if len(global_novel_barcodes) >= 5 * len(barcodes):
+                logger.info("Barcode frequency diversity satisfied...")
+                satisfy_diversity = True
+
+            if satisfy_diversity:
+
+                # Break if there's a single dominant offset or the most common is 2 times more frequent than the second
+                if (
+                    len(read1_offsets_common) == 1 and len(read2_offsets_common) == 1
+                ) or (
+                    len(read1_offsets_common) > 1
+                    and len(read2_offsets_common) > 1
+                    and read1_offsets_common[0][1] >= 2 * read1_offsets_common[1][1]
+                    and read2_offsets_common[0][1] >= 2 * read2_offsets_common[1][1]
+                ):
+                    logger.info("Dominant offsets found...")
+                    break
+        else:
+            # Check conditions for a single read
+            if diversity_count1 >= 5 * len(barcodes):
+                logger.info("Many barcodes seen enough in reads...")
+                satisfy_diversity = True
+
+            if len(global_novel_reads) >= 5 * len(barcodes) and global_novel_barcodes:
+                logger.info("Read depth diversity satisfied...")
+                satisfy_diversity = True
+
+            if len(global_novel_barcodes) >= 5 * len(barcodes):
+                logger.info("Barcode frequency diversity satisfied...")
+                satisfy_diversity = True
+
+            if satisfy_diversity:
+
+                if len(read1_offsets_common) == 1 or (
+                    len(read1_offsets_common) > 1
+                    and read1_offsets_common[0][1] >= 2 * read1_offsets_common[1][1]
+                ):
+                    logger.info("Dominant offsets found...")
+                    break
+
     if not satisfy_diversity:
-        logger.warn("Unable to satisfy diversity criteria. Sequencing depth is probably insufficient!")
-    
-    read1_orientation = (
-        Counter(global_read1_orientations).most_common(1)[0][0] if read1 else None
-    )
+        logger.warn("Sequencing depth is probably insufficient! Continuing anyway...")
+
+    read1_orient = Counter(global_read1_orients).most_common(1)[0][0] if read1 else None
     read1_offset = Counter(global_read1_offsets).most_common(1)[0][0] if read1 else None
 
-    read2_orientation = (
-        Counter(global_read2_orientations).most_common(1)[0][0] if read2 else None
-    )
+    read2_orient = Counter(global_read2_orients).most_common(1)[0][0] if read2 else None
     read2_offset = Counter(global_read2_offsets).most_common(1)[0][0] if read2 else None
 
-    if read1_orientation == "forward" or read2_orientation == "reverse":
+    if read1_orient == "forward" or read2_orient == "reverse":
         need_swap = False
         return (
-            novel_context_read_count1 + novel_context_read_count2,
+            len(global_novel_reads),
             read1_offset,
             read2_offset,
             global_valid_reads1,
             global_valid_reads2,
             global_observed_barcodes,
             need_swap,
-            num_chunks
+            num_chunks,
         )
 
-    elif read1_orientation == "reverse" or read2_orientation == "forward":
+    elif read1_orient == "reverse" or read2_orient == "forward":
         need_swap = True
         return (
-            novel_context_read_count1 + novel_context_read_count2,
+            len(global_novel_reads),
             read2_offset,
             read1_offset,
             global_valid_reads2,
             global_valid_reads1,
             global_observed_barcodes,
             need_swap,
-            num_chunks
+            num_chunks,
         )
 
     else:
@@ -593,7 +617,7 @@ def main(args):
             sample2,
             global_observed_barcodes,
             need_swap,
-            num_chunks
+            num_chunks,
         ) = sample_data(reads1, reads2, barcodes, is_paired)
         # logger.info(f"Sampled {new_reads_sampled:,} unique reads. Found {processed_count1:,} valid matches, including {safe_len(sample1):,} unique forward matches and {safe_len(sample2):,} unique reverse matches...")
         logger.info(
