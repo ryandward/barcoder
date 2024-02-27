@@ -1,16 +1,12 @@
 import argparse
-import copy
-from collections import Counter, defaultdict
 from datetime import datetime
 from multiprocessing import cpu_count
 
 import gzip
-import hashlib
 import os
 import json
 import pandas as pd
 import platform
-from pyparsing import col
 import pysam
 import re
 import rich
@@ -129,8 +125,8 @@ def create_locus_map(genbank_file_name):
                                 (
                                     locus_tag,
                                     gene_name,
-                                    adj_start,
-                                    adj_end,
+                                    int(adj_start),
+                                    int(adj_end),
                                     feature.location.strand,
                                 )
                             )
@@ -272,7 +268,7 @@ def pam_matches(pam_pattern, extracted_pam):
 
 
 # Extract the downstream PAM of the target sequence from the topological map
-def extract_pam(
+def extract_downstream_pam(
     pam,
     tar_start,
     tar_end,
@@ -375,6 +371,27 @@ def extract_upstream_pam(
 def parse_sam_output(
     samfile, locus_map, topological_fasta_file_name, gb_file_name, pam, pam_direction
 ):
+    """
+    Parses the SAM output file and extracts relevant information for each read.
+
+    Args:
+        samfile (pysam.AlignmentFile): The SAM file object.
+        locus_map (dict): A dictionary mapping chromosome positions to gene information.
+        topological_fasta_file_name (str): The filename of the topological FASTA file.
+        gb_file_name (str): The filename of the GenBank file.
+        pam (str): The PAM sequence.
+        pam_direction (str): The direction of the PAM sequence relative to the read.
+
+    Returns:
+        list: A list of dictionaries, where each dictionary represents a read and contains
+        information such as read name, spacer sequence, length, target sequence, mismatches,
+        chromosome, target start and end positions, spacer direction, PAM sequence, coordinates,
+        type of alignment, and difference between spacer and target.
+
+    Raises:
+        ValueError: If there is an error in retrieving reference sequence or calculating
+        target start and end positions.
+    """
     rows_list = []  # Initialize an empty list
     true_chrom_lengths = get_true_chrom_lengths(gb_file_name)
     topological_chrom_lengths = get_topological_chrom_lengths(
@@ -390,7 +407,7 @@ def parse_sam_output(
 
             if pam:
                 if pam_direction == "downstream":
-                    extracted_pam = extract_pam(
+                    extracted_pam = extract_downstream_pam(
                         pam,
                         read.reference_start,
                         read.reference_end,
@@ -568,9 +585,7 @@ def run_bowtie_and_parse(
             ]
 
             bowtie_build_process = subprocess.Popen(
-                bowtie_build_command, 
-                stdout=devnull, 
-                stderr=devnull
+                bowtie_build_command, stdout=devnull, stderr=devnull
             )
             bowtie_build_process.wait()
 
@@ -593,34 +608,36 @@ def run_bowtie_and_parse(
                 ]
 
                 bowtie_process = subprocess.Popen(
-                    bowtie_command, 
-                    stdout=subprocess.PIPE, 
+                    bowtie_command,
+                    stdout=subprocess.PIPE,
                     stderr=devnull,
-                    universal_newlines=True
+                    universal_newlines=True,
                 )
 
         if bowtie_process.stdout is None:
-            raise RuntimeError("Bowtie was unable to start. Check your installation.")    
-        
+            raise RuntimeError("Bowtie was unable to start. Check your installation.")
+
         if bowtie_process.stdout is not None:
-                with pysam.AlignmentFile(bowtie_process.stdout, "r") as samfile:
-                    results = parse_sam_output(
-                        samfile,
-                        locus_map,
-                        topological_fasta_file_name,
-                        args.genome_file,
-                        args.pam,
-                        args.pam_direction,
-                    )
+            with pysam.AlignmentFile(bowtie_process.stdout, "r") as samfile:
+                results = parse_sam_output(
+                    samfile,
+                    locus_map,
+                    topological_fasta_file_name,
+                    args.genome_file,
+                    args.pam,
+                    args.pam_direction,
+                )
 
-                bowtie_process.wait()
+            bowtie_process.wait()
 
-                # Delete the temporary file after we're done with it
-                os.remove(bowtie_output_temp_file.name)
+            # Delete the temporary file after we're done with it
+            os.remove(bowtie_output_temp_file.name)
 
     # Return the results of parse_sam_output
     if results is []:
-        raise RuntimeError("No results were returned from the Bowtie process. Check your input files and parameters.")
+        raise RuntimeError(
+            "No results were returned from the Bowtie process. Check your input files and parameters."
+        )
     else:
         return results
 
@@ -733,10 +750,6 @@ def main(args):
         # now drop the name column
         results = results.drop("name", axis=1).drop_duplicates()
 
-        # print(spacers_seen, file=sys.stderr)
-
-        # print(results, file=sys.stderr)
-
         # Create a 'site' column only for rows that have a 'target'
         results.loc[results["target"].notnull(), "site"] = (
             results["chr"].astype(str) + "_" + results["coords"].astype(str)
@@ -771,8 +784,6 @@ def main(args):
                 "intergenic": intergenic_counts,
             }
         )
-
-        # print(note, file=sys.stderr)
 
         console.log("Annotating results...")
 
@@ -1002,7 +1013,6 @@ def main(args):
     console.log(combined_table)
 
     final_results.to_csv(sys.stdout, sep="\t", index=False, na_rep="None")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Map barcodes to a circular genome")
