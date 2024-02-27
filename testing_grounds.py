@@ -143,8 +143,7 @@ with BowtieRunner() as bowtie:
         if len(sites_with_pam_no_genes) > 0:
             logger.info(sites_with_pam_no_genes.df)
 
-        if len(sites_with_pam_no_genes) > 0:
-        # return the sites without a gene with PAMs that are NOT in multiple sites
+            # return the sites without a gene with PAMs that are NOT in multiple sites
             sites_with_pam_no_genes_not_in_multiple_sites = sites_with_pam_no_genes[
                 ~sites_with_pam_no_genes.Barcode.isin(barcodes_in_multiple_sites)
             ]
