@@ -11,11 +11,11 @@ from typing import Generator, List, Set, Tuple
 
 import rich
 import zstandard as zstd
-from Bio.Seq import Seq
+# from Bio.Seq import Seq
 from rich.console import Console
 from rich.table import Table
 import rich.table
-from Bio import SeqIO
+# from Bio import SeqIO
 
 from Logger import Logger
 
@@ -152,6 +152,19 @@ def read_in_chunks(
 
 
 def sample_data(file1, file2, barcodes, is_paired):
+    """
+    The `sample_data` function samples from data files using barcodes and supports both
+    paired and single-end formats. It processes data in chunks based on barcode count,
+    identifying new barcodes, their orientations, and offsets in reads. It tracks barcode
+    diversity (`diversity_count1`, `diversity_count2`), read orientations and offsets
+    (`global_read1_orients`, `global_read2_orients`, `global_read1_offsets`,
+    `global_read2_offsets`), and unique reads and barcodes (`global_valid_reads1`,
+    `global_valid_reads2`, `global_novel_reads`, `global_observed_barcodes`). After each
+    chunk, it assesses diversity against expected sequencing outcomes, stopping if a
+    dominant offset indicates sufficient diversity. The function returns counts of unique
+    reads, barcode offsets, valid read sets, observed barcodes, a read-swapping flag, and
+    the chunk count.
+    """
     satisfy_diversity = False
 
     rev_barcodes = set(rev_comp(bc) for bc in barcodes)
@@ -160,42 +173,39 @@ def sample_data(file1, file2, barcodes, is_paired):
         file1, file2 if is_paired else None, chunk_size=len(barcodes)
     )
 
+    # Initialize chunk diversity metric
     diversity_count1 = 0
     diversity_count2 = 0
-
-    # Orientation determination
+    # Initialize orientation determination
     global_read1_orients = Counter()
     global_read2_orients = Counter()
-
-    # Offset determination
+    # Initialize offset determination
     global_read1_offsets = Counter()
     global_read2_offsets = Counter()
-
-    # Sequencing depth determination
+    # Initialize sequencing depth determination
     global_valid_reads1 = set()
     global_valid_reads2 = set()
-
+    # Initialize unique barcode and read tracking
     global_novel_reads = set()
-
-    # Keep track of the unique barcodes seen in any orientation
+    # Initialize total number of observed barcodes
     global_observed_barcodes = set()
-
+    # Initialize collector for barcode tracking per chunk
     global_novel_barcodes = []
-
+    # Initialize chunk counter
     num_chunks = 0
 
     for read1_chunk, read2_chunk in chunk_generator:
+        # Increment chunk counter
         num_chunks += 1
-
-        # Lists to collect orientations and offsets for this chunk
+        # Initialize local orientation determination
         novel_read1_orients = []
-        novel_read1_offsets = []
-
         novel_read2_orients = []
+        # Initialize local offset determination
+        novel_read1_offsets = []
         novel_read2_offsets = []
-
+        # Initialize local sequencing depth determination
         novel_barcodes = set()
-
+        # Initialize local unique barcode and read tracking
         novel_reads = set()
 
         for read1, read2 in zip(
@@ -261,31 +271,17 @@ def sample_data(file1, file2, barcodes, is_paired):
                         global_valid_reads2.add(read2)
                         novel_reads.add(read2)
 
+        # Update the global observed barcodes based on the chunk
         global_novel_barcodes.extend(novel_barcodes)
-
-        # Update the global counters after processing each chunk
+        # Update the global orientation list after processing each chunk
         global_read1_orients.update(novel_read1_orients)
-        global_read1_offsets.update(novel_read1_offsets)
-
         global_read2_orients.update(novel_read2_orients)
+        # Update the global offset list after processing each chunk
         global_read2_offsets.update(novel_read2_offsets)
-
+        global_read1_offsets.update(novel_read1_offsets)
+        # Update the most common offsets after processing each chunk
         read1_offsets_common = Counter(global_read1_offsets).most_common(2)
         read2_offsets_common = Counter(global_read2_offsets).most_common(2)
-
-        # logger.debug(f"Chunk {num_chunks} summary:")
-        # logger.debug(f"Number of global valid reads 1: {len(global_valid_reads1)}")
-        # logger.debug(f"Number of global valid reads 2: {len(global_valid_reads2)}")
-        # logger.debug(f"Barcode diversity count 1: {diversity_count1}")
-        # logger.debug(f"Barcode diversity count 2: {diversity_count2}")
-        # logger.debug(
-        #     f"Length of global observed barcodes: {len(global_observed_barcodes)}"
-        # )
-        # logger.debug(f"Number of barcodes: {len(barcodes)}")
-        # logger.debug(f"Number of global novel reads: {len(global_novel_reads)}")
-        # logger.debug(f"Local novel reads: {len(novel_reads)}")
-        # logger.debug(f"Length of novel barcodes: {len(novel_barcodes)}")
-        # logger.debug(f"Global novel barcodes: {len(global_novel_barcodes)}")
 
         # Check conditions for two reads
         if is_paired:
