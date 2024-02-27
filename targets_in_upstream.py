@@ -10,7 +10,6 @@ import platform
 import pysam
 import re
 import rich
-import rich.table
 import subprocess
 import sys
 import tempfile
@@ -21,6 +20,18 @@ from Bio.SeqFeature import CompoundLocation
 from Bio.SeqRecord import SeqRecord
 from rich.console import Console
 from rich.table import Table
+
+from target_fake_file_handler import (
+    create_fake_topological_fastq,
+    create_topological_fasta,
+)
+
+from target_pam_handler import (
+    extract_downstream_pam,
+    extract_upstream_pam,
+    filter_offtargets_by_pam,
+    pam_matches,
+)
 
 
 def open_file(file, mode):
@@ -33,45 +44,7 @@ def create_working_directory(dir_name="working_directory"):
     return dir_name
 
 
-def create_topological_fasta(
-    genbank_file_name, topological_fasta_file_name, overhang_length=0
-):
-    topological_records = []
-    open_func = gzip.open if genbank_file_name.endswith(".gz") else open
-
-    with open_func(genbank_file_name, "rt") as input_handle:
-        for record in SeqIO.parse(input_handle, "genbank"):
-            if record.annotations.get("topology", None) == "circular":
-                overhang_length = 100_000
-
-            new_seq = record.seq + record.seq[:overhang_length]
-            topological_record = SeqRecord(
-                Seq(str(new_seq)), id=record.id, description=record.description
-            )
-            topological_records.append(topological_record)
-
-    with open(topological_fasta_file_name, "w") as output_handle:
-        SeqIO.write(topological_records, output_handle, "fasta")
-
-
-def create_fake_topological_fastq(topological_fasta_file_name, fastq_file):
-    if topological_fasta_file_name.endswith(".gz"):
-        with gzip.open(topological_fasta_file_name, "rt") as input_handle, open(
-            fastq_file, "w"
-        ) as output_handle:
-            for record in SeqIO.parse(input_handle, "fasta"):
-                record.letter_annotations["phred_quality"] = [40] * len(record)
-                SeqIO.write(record, output_handle, "fastq")
-    else:
-        with open(topological_fasta_file_name, "rt") as input_handle, open(
-            fastq_file, "w"
-        ) as output_handle:
-            for record in SeqIO.parse(input_handle, "fasta"):
-                record.letter_annotations["phred_quality"] = [40] * len(record)
-                SeqIO.write(record, output_handle, "fastq")
-
-
-def create_locus_map(genbank_file_name):
+def create_upstream_locus_map(genbank_file_name):
     locus_map, overhang_continue, organisms, seq_lens, topologies, all_genes = (
         {},
         {},
@@ -274,121 +247,8 @@ def get_overlap(tar_start, tar_end, feature_start, feature_end):
         return 0
 
 
-# Check if the extracted PAM matches the PAM pattern
-def pam_matches(pam_pattern, extracted_pam):
-    # Convert N to . for regex matching
-    if extracted_pam is None:
-        return False
-
-    if pam_pattern == "N" * len(pam_pattern) or not pam_pattern:
-        return True
-
-    regex_pattern = pam_pattern.replace("N", ".")
-    return bool(re.match(regex_pattern, extracted_pam))
-
-
-# Extract the downstream PAM of the target sequence from the topological map
-def extract_downstream_pam(
-    pam,
-    tar_start,
-    tar_end,
-    chrom,
-    fasta,
-    dir,
-    true_chrom_lengths,
-    topological_chrom_lengths,
-):
-    true_chrom_length = true_chrom_lengths.get(chrom, None)
-    topological_chrom_length = topological_chrom_lengths.get(chrom, None)
-
-    if pam == "":
-        return None
-
-    if None in (
-        pam,
-        tar_start,
-        tar_end,
-        chrom,
-        fasta,
-        dir,
-        true_chrom_length,
-        topological_chrom_length,
-    ):
-        return None
-
-    if dir == "F":
-        if tar_end + len(pam) > topological_chrom_length:
-            return None
-        extracted_pam = fasta.fetch(
-            reference=chrom, start=tar_end, end=tar_end + len(pam)
-        ).upper()
-
-    elif dir == "R":
-        if tar_start - len(pam) < 0:
-            return None
-        extracted_pam = fasta.fetch(
-            reference=chrom, start=tar_start - len(pam), end=tar_start
-        ).upper()
-        extracted_pam = str(Seq(extracted_pam).reverse_complement())
-
-    else:
-        return None
-
-    return extracted_pam
-
-
-# Extract the upstream PAM of the target sequence from the topological map
-def extract_upstream_pam(
-    pam,
-    tar_start,
-    tar_end,
-    chrom,
-    fasta,
-    dir,
-    true_chrom_lengths,
-    topological_chrom_lengths,
-):
-    true_chrom_length = true_chrom_lengths.get(chrom, None)
-    topological_chrom_length = topological_chrom_lengths.get(chrom, None)
-
-    if pam == "":
-        return None
-
-    if None in (
-        pam,
-        tar_start,
-        tar_end,
-        chrom,
-        fasta,
-        dir,
-        true_chrom_length,
-        topological_chrom_length,
-    ):
-        return None
-
-    if dir == "F":
-        if tar_start - len(pam) < 0:
-            return None
-        extracted_pam = fasta.fetch(
-            reference=chrom, start=tar_start - len(pam), end=tar_start
-        ).upper()
-
-    elif dir == "R":
-        if tar_end + len(pam) > topological_chrom_length:
-            return None
-        extracted_pam = fasta.fetch(
-            reference=chrom, start=tar_end, end=tar_end + len(pam)
-        ).upper()
-        extracted_pam = str(Seq(extracted_pam).reverse_complement())
-
-    else:
-        return None
-
-    return extracted_pam
-
-
 # Parse the SAM file and extract the relevant information
-def parse_sam_output(
+def parse_downstream_sam_output(
     samfile, locus_map, topological_fasta_file_name, gb_file_name, pam, pam_direction
 ):
     rows_list = []  # Initialize an empty list
@@ -620,7 +480,7 @@ def run_bowtie_and_parse(
 
         if bowtie_process.stdout is not None:
             with pysam.AlignmentFile(bowtie_process.stdout, "r") as samfile:
-                results = parse_sam_output(
+                results = parse_downstream_sam_output(
                     samfile,
                     locus_map,
                     topological_fasta_file_name,
@@ -643,14 +503,8 @@ def run_bowtie_and_parse(
         return results
 
 
-# Filter out spacers that don't match the PAM
-def filter_offtargets_by_pam(df):
-    targeting_spacers = df[df["target"].notna()]["spacer"].unique()
-    return df[~((df["target"].isna()) & (df["spacer"].isin(targeting_spacers)))]
-
-
 # Create a note for each spacer
-def create_note(row):
+def create_downstream_note(row):
     parts = []
     if row["sites"] > 0:
         parts.append(f"{row['sites']} {'site' if row['sites'] == 1 else 'sites'}")
@@ -693,8 +547,8 @@ def main(args):
             sys.exit(1)
 
         console.log("Generating topological coordinate maps...")
-        locus_map, organisms, seq_lens, topologies, all_genes = create_locus_map(
-            args.genome_file
+        locus_map, organisms, seq_lens, topologies, all_genes = (
+            create_upstream_locus_map(args.genome_file)
         )
 
         create_topological_fasta(args.genome_file, topological_fasta_file_name)
@@ -794,7 +648,7 @@ def main(args):
         note = note.fillna(0).astype(int)
 
         # Create a 'note' column by applying the create_note function to each row
-        note["note"] = note.apply(create_note, axis=1)
+        note["note"] = note.apply(create_downstream_note, axis=1)
 
         # Merge the 'note' DataFrame with the 'results' DataFrame based on the 'spacer' column
         results = results.merge(note, left_on="spacer", right_index=True, how="left")
