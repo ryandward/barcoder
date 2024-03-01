@@ -2,6 +2,7 @@
 import re
 from Bio.Seq import Seq
 
+
 def extract_downstream_pam(
     pam,
     tar_start,
@@ -100,10 +101,12 @@ def extract_upstream_pam(
 
     return extracted_pam
 
+
 # Filter out spacers that don't match the PAM
 def filter_offtargets_by_pam(df):
     targeting_spacers = df[df["target"].notna()]["spacer"].unique()
     return df[~((df["target"].isna()) & (df["spacer"].isin(targeting_spacers)))]
+
 
 # Check if the extracted PAM matches the PAM pattern
 def pam_matches(pam_pattern, extracted_pam):
