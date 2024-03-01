@@ -3,6 +3,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
+
 def create_topological_fasta(
     genbank_file_name, topological_fasta_file_name, overhang_length=0
 ):
