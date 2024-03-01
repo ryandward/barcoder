@@ -10,16 +10,19 @@ import logging
 
 
 class Logger:
-
     SUBPROC = 25  # Between INFO (20) and WARNING (30)
     HELP = 15  # Between DEBUG (10) and INFO (20)
 
     def __init__(self):
         self.user_locale = locale.getlocale()[0]  # Get the user's locale
-
         console = Console(
-            stderr=True, theme=Theme({"logging.level.subproc": "bold blue", "logging.level.help": "bold green"})
-        
+            stderr=True,
+            theme=Theme(
+                {
+                    "logging.level.subproc": "bold blue",
+                    "logging.level.help": "bold green",
+                }
+            ),
         )
 
         logging.basicConfig(
@@ -29,10 +32,10 @@ class Logger:
             handlers=[RichHandler(console=console)],
         )
         self.logger = logging.getLogger(__name__)
-        
+
         logging.addLevelName(self.SUBPROC, "SUBPROC")
         logging.addLevelName(self.HELP, "HELP")
-        
+
     def format_numbers(self, message):
 
         if isinstance(message, str):
@@ -78,7 +81,7 @@ class Logger:
             message = "No errors reported"
         if self.logger.isEnabledFor(self.SUBPROC):
             self.logger._log(self.SUBPROC, message, args, **kwargs)
-            
+
     def help(self, message, *args, **kwargs):
         message = self.format_numbers(message)
         if not message:
