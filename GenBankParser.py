@@ -104,6 +104,21 @@ class GenBankParser(Logger):
         # Write the records to a FASTA file
         with open(filename, "w") as fasta_file:
             SeqIO.write(self.records.values(), fasta_file, "fasta")
+            
+    def find_gene_name_for_locus(self, locus_tag):
+        # Iterate through all records in the GenBank file
+        for record_id, record in self.records.items():
+            for feature in record.features:
+                if feature.type == "gene":
+                    # Check if this gene feature has a locus tag that matches the locus_tag argument
+                    if (
+                        "locus_tag" in feature.qualifiers
+                        and feature.qualifiers["locus_tag"][0] == locus_tag
+                    ):
+                        # If a gene name is available, return it, otherwise return the locus tag
+                        return feature.qualifiers.get("gene", [locus_tag])[0]
+        # Return None or locus_tag if not found; depends on how you want to handle not found cases
+        return None
 
     def get_pam_sequence(self, row, pam_length, direction):
         # Fetch the sequence for the range
