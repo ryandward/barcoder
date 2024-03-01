@@ -1,8 +1,6 @@
 import pandas as pd
 import pyranges as pr
 import pysam
-
-
 from functools import lru_cache
 
 
