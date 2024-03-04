@@ -14,8 +14,6 @@ import pandas as pd
 from io import StringIO
 import json
 
-ramdisk_path = "/tmp/ramdisk"
-os.environ['TMPDIR'] = ramdisk_path
 
 def is_dna(sequence):
     return all(base in "GATC" for base in sequence)
@@ -135,7 +133,7 @@ def main(args):
         # remove everything where mismatches > 0
         if args.mismatches > 0:
             console.log(
-                "[bold red]Removing guides with mismatches. There shouldn't be any![/bold red]"
+                "[bold red]Removing guides with mismatches.\nThere shouldn't be any if offtargets are omitted![/bold red]"
             )
             len_before = len(targets)
 
@@ -242,17 +240,31 @@ def main(args):
                 # Here, last_offset is the offset of the last spacer that was added to selected_spacers
 
                 if args.full_overlap:
-                    last_offset = group["offset"].loc[group["overlap"] == args.barcode_length].iloc[0]
+                    filtered_df = group["offset"].loc[
+                        group["overlap"] == args.barcode_length
+                    ]
+                    if not filtered_df.empty:
+                        last_offset = filtered_df.iloc[0]
+                    else:
+                        # Handle the case when the DataFrame is empty
+                        # For example, set last_offset to a default value
+                        last_offset = None
                 else:
                     last_offset = group["offset"].iloc[0]
-                
-                selected_spacers.add(group["spacer"].loc[group["offset"] == last_offset].iloc[0])
-                
+
+                if last_offset is not None:
+                    selected_spacers.add(
+                        group["spacer"].loc[group["offset"] == last_offset].iloc[0]
+                    )
+
                 # iterate through the rest of the group
                 for index, row in group.iterrows():
-                    
+
                     # If the current offset is at least tile_size away from the last offset, add the spacer to the set
-                    if row["offset"] >= last_offset + args.tile_size:
+                    if (
+                        last_offset is not None
+                        and row["offset"] >= last_offset + args.tile_size
+                    ):
                         selected_spacers.add(row["spacer"])
                         last_offset = row["offset"]
 
