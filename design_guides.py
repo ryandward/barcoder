@@ -32,16 +32,17 @@ def find_sequences_with_barcode_and_pam(
                 for i in range(len(sequence) - barcode_length - len(pam) + 1):
                     # If PAM is downstream
                     if args.pam_direction == "downstream" and pam_regex.match(
-                        sequence[i + barcode_length : i + barcode_length + len(pam)]
+                        sequence[i + barcode_length: i +
+                                 barcode_length + len(pam)]
                     ):
-                        spacer = sequence[i : i + barcode_length]
+                        spacer = sequence[i: i + barcode_length]
                         if is_dna(spacer):
                             matching_sequences.add(spacer)
                     # If PAM is upstream
                     elif args.pam_direction == "upstream" and pam_regex.match(
-                        sequence[i - len(pam) : i]
+                        sequence[i - len(pam): i]
                     ):
-                        spacer = sequence[i : i + barcode_length]
+                        spacer = sequence[i: i + barcode_length]
                         if is_dna(spacer):
                             matching_sequences.add(spacer)
 
@@ -80,9 +81,10 @@ def main(args):
 
         create_sgRNA_fasta(matching_sequences, sgRNA_fasta_file_name)
 
-        console.log(f"Found {len(matching_sequences):,} potential guides in the genome")
         console.log(
-            f"Stay tuned... running 'targets.py' to find guides for {args.genome_file} with {args.barcode_length}bp barcodes and {args.pam} PAM sequence"
+            f"Found {len(matching_sequences):,} potential guides in the genome")
+        console.log(
+            f"Stay tuned... running 'targets.py' to find guides for {args.genome_file} with {args.barcode_length} bp barcodes and {args.pam} PAM sequence"
         )
 
         result = subprocess.run(
@@ -118,11 +120,13 @@ def main(args):
 
         if args.omit_offtargets:
 
-            console.log("[bold red]Removing guides with off-targets[/bold red]")
+            console.log(
+                "[bold red]Removing guides with off-targets[/bold red]")
             len_before = len(targets)
             # Extract the number of sites from the 'note' column
             targets.loc[:, "sites"] = (
-                targets["note"].str.extract(r"(\d+) site", expand=False).astype(int)
+                targets["note"].str.extract(
+                    r"(\d+) site", expand=False).astype(int)
             )
             # Create a mask that is True for rows where 'sites' is 1
             mask = targets["sites"] == 1
@@ -254,7 +258,8 @@ def main(args):
 
                 if last_offset is not None:
                     selected_spacers.add(
-                        group["spacer"].loc[group["offset"] == last_offset].iloc[0]
+                        group["spacer"].loc[group["offset"]
+                                            == last_offset].iloc[0]
                     )
 
                 # iterate through the rest of the group
@@ -281,16 +286,25 @@ def main(args):
 
             len_before = len(targets)
 
-            # Sort the DataFrame by 'locus_tag', 'offset', and 'overlap'
-            targets = targets.sort_values(["locus_tag", "offset", "overlap"])
+            # If full_overlap is true, filter out rows with overlap less than barcode length
+            if args.full_overlap:
+                targets = targets[targets['overlap'] >= args.barcode_length]
+
+            # Sort the DataFrame by 'locus_tag' and 'offset'
+            targets = targets.sort_values(["locus_tag", "offset"])
 
             # Group the DataFrame by 'locus_tag' and keep the top n rows
-            top_targets = targets.groupby("locus_tag").head(args.keep_top)
+            top_targets = targets.groupby("locus_tag").apply(
+                lambda x: x.nsmallest(args.keep_top, 'offset'))
+
+            # Flatten the index after groupby and apply
+            top_targets.reset_index(drop=True, inplace=True)
 
             # Get the spacers that are in the top n rows for each gene
             top_spacers = top_targets["spacer"].unique()
 
-            # Filter the original DataFrame to keep only the rows that are in the top n rows for each gene or that target multiple genes
+            # Filter the original DataFrame to keep only the rows that are in the top n rows for each gene
+            # and that target multiple genes
             targets = targets[targets["spacer"].isin(top_spacers)]
 
             console.log(f"Removed {(len_before - len(targets)):,} guides")
@@ -319,7 +333,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("genome_file", help="Path to genome_gb_file", type=str)
     parser.add_argument("pam", help="PAM sequence", type=str)
-    parser.add_argument("barcode_length", help="Length of the barcode", type=int)
+    parser.add_argument(
+        "barcode_length", help="Length of the barcode", type=int)
     parser.add_argument(
         "--orientation",
         choices=["forward", "reverse", "both"],
