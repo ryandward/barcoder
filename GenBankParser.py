@@ -1,3 +1,4 @@
+import re
 from Bio import SeqIO
 import pyranges as pr
 import pandas as pd
@@ -15,13 +16,65 @@ class GenBankReader:
     def records(self):
         with open(self.filename, "r") as handle:
             return SeqIO.to_dict(SeqIO.parse(handle, "genbank"))
-        
-        
+
+
+class PAMFinder:
+    def __init__(self, records, pam, direction):
+        self.records = records
+        self.pam = pam
+        self.pam_length = len(pam)
+        self.pam_pattern = self.pam.replace("N", "[ATCG]")
+
+        self.direction = direction
+
+    def get_pam_seq(self, row):
+        # Fetch the sequence for the range
+        sequence = self.records[row.Chromosome].seq[row.Start : row.End]
+
+        # If the strand is "-", get the reverse complement of the sequence
+        if row.Strand == "-":
+            sequence = sequence.reverse_complement()
+
+        # Get the PAM sequence
+        if self.direction == "upstream":
+
+            if row.Strand == "+":
+                pam_sequence = self.records[row.Chromosome].seq[
+                    row.Start - self.pam_length : row.Start
+                ]
+            else:
+                pam_sequence = self.records[row.Chromosome].seq[
+                    row.End : row.End + self.pam_length
+                ]
+        elif self.direction == "downstream":
+            if row.Strand == "+":
+                pam_sequence = self.records[row.Chromosome].seq[
+                    row.End : row.End + self.pam_length
+                ]
+            else:
+                pam_sequence = self.records[row.Chromosome].seq[
+                    row.Start - self.pam_length : row.Start
+                ]
+        else:
+            raise ValueError("direction must be 'upstream' or 'downstream'")
+
+        # If the strand is "-", get the reverse complement of the PAM sequence
+        if row.Strand == "-":
+            pam_sequence = pam_sequence.reverse_complement()
+
+        return str(pam_sequence)
+
+    def pam_matches(self, sequence):
+        # check if the sequence matches the PAM pattern
+        return bool(re.search(self.pam_pattern, sequence))
+
+
 class GenBankParser(Logger):
     def __init__(self, filename):
         super().__init__()
         self.reader = GenBankReader(filename)
         self.records = self.reader.records
+        # self.pam_finder = PAMFinder(self.records)
         self.info(f"Found the following records:")
         self.json(self.organisms)
 
@@ -104,7 +157,7 @@ class GenBankParser(Logger):
         # Write the records to a FASTA file
         with open(filename, "w") as fasta_file:
             SeqIO.write(self.records.values(), fasta_file, "fasta")
-            
+
     def find_gene_name_for_locus(self, locus_tag):
         # Iterate through all records in the GenBank file
         for record_id, record in self.records.items():
@@ -119,39 +172,3 @@ class GenBankParser(Logger):
                         return feature.qualifiers.get("gene", [locus_tag])[0]
         # Return None or locus_tag if not found; depends on how you want to handle not found cases
         return None
-
-    def get_pam_sequence(self, row, pam_length, direction):
-        # Fetch the sequence for the range
-        sequence = self.records[row.Chromosome].seq[row.Start : row.End]
-
-        # If the strand is "-", get the reverse complement of the sequence
-        if row.Strand == "-":
-            sequence = sequence.reverse_complement()
-
-        # Get the PAM sequence
-        if direction == "upstream":
-            if row.Strand == "+":
-                pam_sequence = self.records[row.Chromosome].seq[
-                    row.Start - pam_length : row.Start
-                ]
-            else:
-                pam_sequence = self.records[row.Chromosome].seq[
-                    row.End : row.End + pam_length
-                ]
-        elif direction == "downstream":
-            if row.Strand == "+":
-                pam_sequence = self.records[row.Chromosome].seq[
-                    row.End : row.End + pam_length
-                ]
-            else:
-                pam_sequence = self.records[row.Chromosome].seq[
-                    row.Start - pam_length : row.Start
-                ]
-        else:
-            raise ValueError("direction must be 'upstream' or 'downstream'")
-
-        # If the strand is "-", get the reverse complement of the PAM sequence
-        if row.Strand == "-":
-            pam_sequence = pam_sequence.reverse_complement()
-
-        return str(pam_sequence)
