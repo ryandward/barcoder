@@ -42,10 +42,10 @@ with BowtieRunner() as bowtie:
     targets = sam.ranges.join(genbank.ranges)
 
 # Create a CRISPRiLibrary instance to manage CRISPR interference (CRISPRi) guides.
-crispri_guides = CRISPRiLibrary(targets.df, pam)
+guides = CRISPRiLibrary(targets.df, pam)
 
 # Print the unique targets for the CRISPRi library.
-print(crispri_guides.feature_unique_targets)
+print(guides.unique_targets)
 
 # Print unambiguous targets for the CRISPRi library.
-print(crispri_guides.feature_unambiguous_targets)
+print(guides.unambiguous_targets)

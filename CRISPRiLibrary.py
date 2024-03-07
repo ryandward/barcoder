@@ -4,11 +4,10 @@ class CRISPRiLibrary:
         self.pam_finder = pam_finder
         self._annotate_targets()
         self.source_unique_targets = self.get_source_unique_targets()
-        self.feature_targets = self.get_feature_targets()
-        self.feature_unique_targets = (
-            self.get_feature_unique_targets()
-        )  # This is probably what you want
-        self.feature_unambiguous_targets = self.get_feature_unambiguous_targets()
+        self.mapped_targets = self.get_mapped_targets()
+        # ⬇️ This is probably what you want
+        self.unique_targets = self._get_unique_targets()
+        self.unambiguous_targets = self._get_unambiguous_targets()
 
     def _annotate_targets(self):
         self.targets_df["PAM"] = self.targets_df.apply(
@@ -29,7 +28,7 @@ class CRISPRiLibrary:
             .reset_index(drop=True)
         )
 
-    def get_feature_targets(self):
+    def get_mapped_targets(self):
         return (
             self.targets_df[
                 (self.targets_df["Type"] != "source")
@@ -54,19 +53,17 @@ class CRISPRiLibrary:
             .reset_index(drop=True)
         )
 
-    def get_feature_unique_targets(self):
-        feature_targets = self.get_feature_targets()
+    def _get_unique_targets(self):
+        mapped_targets = self.get_mapped_targets()
         return (
-            feature_targets[
-                feature_targets["Barcode"].isin(self.source_unique_targets.Barcode)
+            mapped_targets[
+                mapped_targets["Barcode"].isin(self.source_unique_targets.Barcode)
             ]
             .sort_values(["Chromosome", "Start", "End"])
             .reset_index(drop=True)
         )
 
-    def get_feature_unambiguous_targets(self):
-        return self.feature_unique_targets[
-            ~self.feature_unique_targets.duplicated(subset=["Barcode"]).reset_index(
-                drop=True
-            )
+    def _get_unambiguous_targets(self):
+        return self.unique_targets[
+            ~self.unique_targets.duplicated(subset=["Barcode"]).reset_index(drop=True)
         ]
