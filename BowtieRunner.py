@@ -4,7 +4,6 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
-
 import os
 import shutil
 import subprocess
@@ -140,7 +139,7 @@ class BowtieRunner(Logger):
 
         except subprocess.CalledProcessError as e:
             raise BowtieError(f"{bowtie_path} failed") from e
-        
+
 
 class BowtieError(Exception):
     """Exception raised for errors in the BowtieRunner.
