@@ -3,8 +3,8 @@ class CRISPRiLibrary:
         self.targets_df = targets_df
         self.pam_finder = pam_finder
         self._annotate_targets()
-        self.source_unique_targets = self.get_source_unique_targets()
-        self.mapped_targets = self.get_mapped_targets()
+        self.source_unique_targets = self._get_source_unique_targets()
+        self.mapped_targets = self._get_mapped_targets()
         # ⬇️ This is probably what you want
         self.unique_targets = self._get_unique_targets()
         self.unambiguous_targets = self._get_unambiguous_targets()
@@ -17,7 +17,7 @@ class CRISPRiLibrary:
             lambda x: self.pam_finder.pam_matches(x)
         )
 
-    def get_source_unique_targets(self):
+    def _get_source_unique_targets(self):
         """
         Returns a DataFrame containing the unique source targets.
 
@@ -41,7 +41,7 @@ class CRISPRiLibrary:
             .reset_index(drop=True)
         )
 
-    def get_mapped_targets(self):
+    def _get_mapped_targets(self):
         """
         Returns a DataFrame containing the mapped targets.
 
@@ -89,7 +89,7 @@ class CRISPRiLibrary:
         Returns:
             pandas.DataFrame: A DataFrame containing the unique guide targets.
         """
-        mapped_targets = self.get_mapped_targets()
+        mapped_targets = self._get_mapped_targets()
         return (
             mapped_targets[
                 mapped_targets["Barcode"].isin(self.source_unique_targets.Barcode)
