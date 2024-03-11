@@ -6,6 +6,8 @@ from Logger import Logger
 from Bio.SeqFeature import CompoundLocation
 from functools import lru_cache
 
+from PAMProcessor import PAMProcessor
+
 
 class GenBankReader:
     def __init__(self, filename):
@@ -16,57 +18,6 @@ class GenBankReader:
     def records(self):
         with open(self.filename, "r") as handle:
             return SeqIO.to_dict(SeqIO.parse(handle, "genbank"))
-
-
-class PAMFinder:
-    def __init__(self, records, pam, direction):
-        self.records = records
-        self.pam = pam
-        self.pam_length = len(pam)
-        self.pam_pattern = self.pam.replace("N", "[ATCG]")
-
-        self.direction = direction
-
-    def get_pam_seq(self, row):
-        # Fetch the sequence for the range
-        sequence = self.records[row.Chromosome].seq[row.Start : row.End]
-
-        # If the strand is "-", get the reverse complement of the sequence
-        if row.Strand == "-":
-            sequence = sequence.reverse_complement()
-
-        # Get the PAM sequence
-        if self.direction == "upstream":
-
-            if row.Strand == "+":
-                pam_sequence = self.records[row.Chromosome].seq[
-                    row.Start - self.pam_length : row.Start
-                ]
-            else:
-                pam_sequence = self.records[row.Chromosome].seq[
-                    row.End : row.End + self.pam_length
-                ]
-        elif self.direction == "downstream":
-            if row.Strand == "+":
-                pam_sequence = self.records[row.Chromosome].seq[
-                    row.End : row.End + self.pam_length
-                ]
-            else:
-                pam_sequence = self.records[row.Chromosome].seq[
-                    row.Start - self.pam_length : row.Start
-                ]
-        else:
-            raise ValueError("direction must be 'upstream' or 'downstream'")
-
-        # If the strand is "-", get the reverse complement of the PAM sequence
-        if row.Strand == "-":
-            pam_sequence = pam_sequence.reverse_complement()
-
-        return str(pam_sequence)
-
-    def pam_matches(self, sequence):
-        # check if the sequence matches the PAM pattern
-        return bool(re.search(self.pam_pattern, sequence))
 
 
 class GenBankParser(Logger):
