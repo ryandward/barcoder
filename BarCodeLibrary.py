@@ -5,6 +5,7 @@ import csv
 import os
 from functools import lru_cache
 
+
 class BarCode:
     def __init__(self, sequence: Seq):
         self.sequence = sequence
@@ -43,14 +44,17 @@ class BarCodeLibraryReader:
                 barcodes.append(row[barcode_index])
         return barcodes
 
+
 class BarCodeLibrary(Logger):
-    def __init__(self, filename=None, **kwargs):
+    def __init__(self, filename=None, barcodes=None, **kwargs):
         super().__init__()
         self._barcodes = set()
         self.kwargs = kwargs
         if filename is not None:
             self.reader = BarCodeLibraryReader(filename, **self.kwargs)
             self.load()
+        if barcodes is not None:
+            self.load_from_list(barcodes)
 
     @property
     @lru_cache(maxsize=None)
@@ -78,11 +82,16 @@ class BarCodeLibrary(Logger):
         except Exception as e:
             raise BarCodeLibraryError("Failed to load barcodes") from e
 
+    def load_from_list(self, barcodes):
+        for sequence in barcodes:
+            self.add(sequence)
+        self.info(f"Loaded {self.size} barcodes from list ...")
+
     @property
     @lru_cache(maxsize=None)
     def size(self):
         return len(self._barcodes)
-    
+
 
 class BarCodeLibraryError(Exception):
     """Exception raised for errors in the BarCodeLibrary.

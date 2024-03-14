@@ -1,6 +1,9 @@
+from Bio.Seq import Seq
+
+
 class CRISPRiLibrary:
-    def __init__(self, targets_df, pam_finder):
-        self.targets_df = targets_df
+    def __init__(self, pyranges_df, pam_finder):
+        self.targets_df = pyranges_df
         self.pam_finder = pam_finder
         self._annotate_targets()
         self.source_unique_targets = self._get_source_unique_targets()
@@ -15,6 +18,16 @@ class CRISPRiLibrary:
         )
         self.targets_df["Targeting"] = self.targets_df["PAM"].apply(
             lambda x: self.pam_finder.pam_matches(x)
+        )
+
+        # if Strand is negative, reverse complement the Barcode
+        self.targets_df["Barcode"] = self.targets_df.apply(
+            lambda row: (
+                row.Barcode
+                if row.Strand == "+"
+                else str(Seq(row.Barcode).reverse_complement())
+            ),
+            axis=1,
         )
 
     def _get_source_unique_targets(self):
