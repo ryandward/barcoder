@@ -6,8 +6,6 @@ from Logger import Logger
 from Bio.SeqFeature import CompoundLocation
 from functools import lru_cache
 
-from PAMProcessor import PAMProcessor
-
 
 class GenBankReader:
     def __init__(self, filename):
