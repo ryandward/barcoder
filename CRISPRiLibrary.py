@@ -20,16 +20,6 @@ class CRISPRiLibrary:
             lambda x: self.pam_finder.pam_matches(x)
         )
 
-        # if Strand is negative, reverse complement the Barcode
-        self.targets_df["Barcode"] = self.targets_df.apply(
-            lambda row: (
-                row.Barcode
-                if row.Strand == "+"
-                else str(Seq(row.Barcode).reverse_complement())
-            ),
-            axis=1,
-        )
-
     def _get_source_unique_targets(self):
         """
         Returns a DataFrame containing the unique source targets.

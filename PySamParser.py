@@ -2,6 +2,11 @@ import pandas as pd
 import pyranges as pr
 import pysam
 from functools import lru_cache
+from Bio.Seq import Seq
+
+
+def rev_comp(seq):
+    return str(Seq(seq).reverse_complement())
 
 
 class PySamParser:
@@ -20,17 +25,23 @@ class PySamParser:
 
         for read in self.read_sam():
 
+            if read.is_reverse == 0:
+                strand = "+"
+                sequence = read.query_sequence
+            elif read.is_reverse == 1:
+                strand = "-"
+                sequence = rev_comp(read.query_sequence)
+            else:
+                strand = "."
+                sequence = None
+
             interval_dict = {
                 "Chromosome": read.reference_name,
                 "Start": read.reference_start,
                 "End": read.reference_end,
                 "Mapped": True if not read.is_unmapped else False,
-                "Strand": (
-                    "+"
-                    if read.is_reverse == 0
-                    else "-" if read.is_reverse == 1 else "."
-                ),
-                "Barcode": read.query_sequence,
+                "Strand": strand,
+                "Barcode": sequence,
                 "Mismatches": (read.get_tag("NM") if read.has_tag("NM") else "0"),
             }
 
