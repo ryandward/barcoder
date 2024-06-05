@@ -149,7 +149,7 @@ def dispatch(dispatch_queues, sorter_queue, read_done_events, dispatch_done_even
         console.log(f"{dispatch_name} failed to finish.", style="bold red")
 
 
-def sorter(sorter_queue, merger_queue, read_done_events, sort_done_event, sorter_lock):
+def sorter(sorter_queue, merger_queue, read_done_events, dispatch_done_event, sort_done_event, sorter_lock):
     sorter_name = f"[bold white]Sorter {mp.current_process().name}[/bold white]"
 
     while True:
@@ -193,6 +193,7 @@ def merger(
     send_ends,
     sort_done_events,
     merger_done_event,
+    read_done_events,
     output_filenames,
     writer_sems,
 ):
@@ -240,7 +241,6 @@ def merger(
 
     for event in read_done_events:
         event.wait()
-    dispatch_done_event.wait()
     for event in sort_done_events:
         event.wait()
 
@@ -293,7 +293,7 @@ def merger(
     console.log(f"{merger_name} finished.", style="red")
 
 
-def writer_process(recv_end, output_filename, writer_sem):
+def writer_process(recv_end, output_filename, writer_sem, merger_done_event):
     writer_name = f"[bold cyan]Writer {mp.current_process().name}[/bold cyan]"
 
     with pyzstd.open(output_filename, "wb") as f:
@@ -384,6 +384,7 @@ if __name__ == "__main__":
                     sorter_queue,
                     merger_queue,
                     read_done_events,
+                    dispatch_done_event,
                     sort_done_event,
                     sorter_lock,
                 ),
@@ -397,13 +398,14 @@ if __name__ == "__main__":
                 merger_send_ends,
                 sort_done_events,
                 merger_done_event,
+                read_done_events,
                 output_filenames,
                 writer_sems,
             ),
         )
         writers = [
             mp.Process(
-                target=writer_process, args=(recv_end, output_filename, writer_sem)
+                target=writer_process, args=(recv_end, output_filename, writer_sem, merger_done_event)
             )
             for recv_end, output_filename, writer_sem in zip(
                 writer_recv_ends, output_filenames, writer_sems
