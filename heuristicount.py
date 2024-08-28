@@ -11,10 +11,12 @@ from typing import Generator, List, Set, Tuple
 
 import rich
 import zstandard as zstd
+
 # from Bio.Seq import Seq
 from rich.console import Console
 from rich.table import Table
 import rich.table
+
 # from Bio import SeqIO
 
 from Logger import Logger
@@ -883,8 +885,8 @@ Start by rerunning the analysis on the read that contains the identifiable flank
         for barcode, count in doc_bcs.items():
             print("\t".join([barcode, str(count)]))
 
-        for barcode, count in undoc_bcs.items():
-            print("\t".join([barcode, str(count)]))
+        # for barcode, count in undoc_bcs.items():
+        #     print("\t".join([barcode, str(count)]))
 
     except ValueError as ve:
         logger.error(f"{str(ve)}")
