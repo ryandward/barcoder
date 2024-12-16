@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from contextlib import nullcontext
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
-from typing import Generator, List, Set, Tuple
+from typing import Generator, List, Optional, Set, Tuple
 
 import rich
 import zstandard as zstd
@@ -402,32 +402,23 @@ def find_flanks(
         update_flanks("L_flank", L_flank, len(L_flank))
         update_flanks("R_flank", R_flank, len(R_flank))
 
-    def extract_best_flank(counts: Counter) -> str:
+    def extract_best_flank(counts: Counter) -> Optional[str]:
         most_common_prev = None
         for fl_len in range(max_flank, 0, -1):
-            # print(f"Potential flank sequences: {counts}", file=sys.stderr)
-
             potential_seqs = [seq for seq in counts if len(seq) == fl_len]
             if not potential_seqs:
                 continue
+
             most_common = max(potential_seqs, key=lambda x: counts[x])
-            if fl_len == max_flank:
-                if (
-                    most_common_prev is None
-                    or counts[most_common] > 3 * counts[most_common_prev]
-                ):
-                    return most_common
+
+            if most_common_prev is None:
+                most_common_prev = most_common
+            elif counts[most_common] > 3 * counts[most_common_prev]:
+                most_common_prev = most_common
             else:
-                if (
-                    most_common_prev is not None
-                    and counts[most_common] > 3 * counts[most_common_prev]
-                ):
-                    return most_common
-                if most_common_prev is None or (
-                    counts[most_common] * 3 < counts[most_common_prev]
-                ):
-                    most_common_prev = most_common
-        return None
+                continue
+
+        return most_common_prev
 
     L_most_common = extract_best_flank(L_flanks)
     R_most_common = extract_best_flank(R_flanks)
